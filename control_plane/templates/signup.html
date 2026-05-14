@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DataWorksAI Agent Registry — Get Started</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a; color: #e2e8f0; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 2rem;
+    }
+    .card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 12px; padding: 2.5rem; width: 100%; max-width: 480px;
+    }
+    .logo { font-size: 1.8rem; font-weight: 700; color: #38bdf8; margin-bottom: 0.25rem; }
+    .tagline { color: #94a3b8; margin-bottom: 2rem; font-size: 0.95rem; }
+    label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.35rem; font-weight: 500; }
+    input[type=email] {
+      width: 100%; padding: 0.65rem 0.9rem; background: #0f172a;
+      border: 1px solid #334155; border-radius: 8px; color: #e2e8f0;
+      font-size: 1rem; outline: none; transition: border-color 0.2s;
+    }
+    input[type=email]:focus { border-color: #38bdf8; }
+    button {
+      width: 100%; margin-top: 1.25rem; padding: 0.75rem;
+      background: #38bdf8; color: #0f172a; border: none; border-radius: 8px;
+      font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s;
+    }
+    button:hover { background: #7dd3fc; }
+    .error { background: #450a0a; border: 1px solid #ef4444; color: #fca5a5;
+              border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
+    .success-box { background: #052e16; border: 1px solid #22c55e; border-radius: 8px; padding: 1.25rem; margin-top: 1rem; }
+    .success-box h3 { color: #4ade80; margin-bottom: 0.75rem; }
+    .key-box {
+      background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+      padding: 0.6rem 0.9rem; font-family: monospace; font-size: 0.85rem;
+      color: #a78bfa; word-break: break-all; margin: 0.5rem 0 1rem;
+    }
+    .hint { font-size: 0.82rem; color: #64748b; margin-top: 0.5rem; }
+    .features { margin-top: 2rem; display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    .feat { background: #0f172a; border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.82rem; }
+    .feat-icon { font-size: 1.1rem; }
+    .feat-title { font-weight: 600; color: #e2e8f0; margin: 0.25rem 0 0.1rem; }
+    .feat-desc { color: #64748b; }
+    a { color: #38bdf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🤖 DataWorksAI Registry</div>
+    <div class="tagline">Agent discovery for multi-agent systems — free to use, zero infrastructure.</div>
+
+    {% if error %}
+    <div class="error">⚠️ {{ error }}</div>
+    {% endif %}
+
+    {% if success %}
+    <div class="success-box">
+      <h3>✅ You're registered!</h3>
+      <p style="color:#86efac; font-size:0.9rem; margin-bottom:0.5rem;">Save your API key — it won't be shown again.</p>
+      <div class="key-box">{{ api_key }}</div>
+      <p style="color:#86efac; font-size:0.85rem;">Your TLD: <strong>{{ tld }}</strong></p>
+      <p class="hint" style="margin-top:0.75rem;">
+        <a href="/dashboard?api_key={{ api_key }}">→ Open dashboard</a>
+      </p>
+    </div>
+
+    <div style="margin-top:1.5rem; background:#0f172a; border-radius:8px; padding:1rem;">
+      <p style="font-size:0.82rem; color:#94a3b8; margin-bottom:0.5rem;">Quick start:</p>
+      <pre style="font-size:0.78rem; color:#a78bfa; overflow-x:auto">curl -X POST http://97.107.132.213:6900/register \
+  -H "X-API-Key: {{ api_key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"my-agent","agent_url":"http://me:9001",
+       "capabilities":["chat"]}'</pre>
+    </div>
+    {% else %}
+    <form method="POST" action="/signup">
+      <div style="margin-bottom:1rem;">
+        <label for="email">Work email</label>
+        <input type="email" id="email" name="email" placeholder="you@company.com" required autofocus/>
+      </div>
+      <button type="submit">Get free API key →</button>
+    </form>
+
+    <div class="features">
+      <div class="feat">
+        <div class="feat-icon">🔍</div>
+        <div class="feat-title">Semantic search</div>
+        <div class="feat-desc">Find agents by capability, not just ID</div>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">🔗</div>
+        <div class="feat-title">Federation</div>
+        <div class="feat-desc">Link your private registries</div>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">🛡️</div>
+        <div class="feat-title">Tenant isolation</div>
+        <div class="feat-desc">Your agents, your namespace</div>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">⚡</div>
+        <div class="feat-title">Always on</div>
+        <div class="feat-desc">MongoDB-backed, zero maintenance</div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</body>
+</html>

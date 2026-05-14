@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DataWorksAI Registry — Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a; color: #e2e8f0; min-height: 100vh;
+    }
+    header {
+      background: #1e293b; border-bottom: 1px solid #334155;
+      padding: 1rem 2rem; display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo { font-size: 1.2rem; font-weight: 700; color: #38bdf8; }
+    .tenant-info { font-size: 0.82rem; color: #64748b; }
+    .tenant-info span { color: #94a3b8; }
+    main { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+    h2 { font-size: 1.1rem; font-weight: 600; color: #94a3b8; margin-bottom: 1rem; }
+
+    .stats-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 1rem; margin-bottom: 2rem;
+    }
+    .stat-card {
+      background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+      padding: 1.25rem; text-align: center;
+    }
+    .stat-num  { font-size: 2rem; font-weight: 700; color: #38bdf8; }
+    .stat-label{ font-size: 0.8rem; color: #64748b; margin-top: 0.25rem; }
+
+    .section { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.5rem; margin-bottom: 2rem; }
+    .key-box {
+      background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+      padding: 0.5rem 0.9rem; font-family: monospace; font-size: 0.83rem;
+      color: #a78bfa; word-break: break-all; margin: 0.5rem 0;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+    th { text-align: left; color: #64748b; font-weight: 500; padding: 0.5rem 0.75rem;
+         border-bottom: 1px solid #334155; }
+    td { padding: 0.6rem 0.75rem; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    tr:hover td { background: #0f172a; }
+    .badge {
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 20px;
+      font-size: 0.75rem; font-weight: 600;
+    }
+    .badge-alive { background: #052e16; color: #4ade80; }
+    .badge-dead  { background: #450a0a; color: #f87171; }
+    .cap { background: #0c2a4a; color: #7dd3fc; padding: 0.1rem 0.4rem;
+           border-radius: 4px; font-size: 0.72rem; margin: 0.1rem; display: inline-block; }
+
+    .curl-box {
+      background: #0f172a; border-radius: 8px; padding: 1rem;
+      font-family: monospace; font-size: 0.8rem; color: #a78bfa;
+      overflow-x: auto; white-space: pre;
+    }
+    .empty { color: #475569; font-style: italic; padding: 1rem 0; }
+    .refresh { float: right; font-size: 0.78rem; color: #475569; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="logo">🤖 DataWorksAI Registry</div>
+  <div class="tenant-info">
+    {% if tenant %}
+    <span>{{ tenant.email }}</span> · TLD: <span>{{ tenant.tld }}</span>
+    {% endif %}
+    · Updated: <span>{{ now }}</span>
+  </div>
+</header>
+<main>
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.get('total_agents', 0) }}</div>
+      <div class="stat-label">Total Agents</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:#4ade80">{{ stats.get('alive_agents', 0) }}</div>
+      <div class="stat-label">Alive</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.get('total_clients', 0) }}</div>
+      <div class="stat-label">Clients</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:{% if stats.get('mongodb_enabled') %}#4ade80{% else %}#f87171{% endif %}">
+        {% if stats.get('mongodb_enabled') %}✓{% else %}✗{% endif %}
+      </div>
+      <div class="stat-label">MongoDB</div>
+    </div>
+  </div>
+
+  <!-- API Key & quick-start -->
+  <div class="section">
+    <h2>Your API Key</h2>
+    <div class="key-box">{{ api_key }}</div>
+    <p style="font-size:0.8rem; color:#475569; margin-top:0.5rem;">
+      Pass this as <code style="color:#a78bfa">X-API-Key</code> on every request.
+    </p>
+  </div>
+
+  <!-- SDK snippet -->
+  <div class="section">
+    <h2>Quick-start SDK</h2>
+    <div class="curl-box">pip install agentns
+
+# Register your agent
+curl -X POST http://97.107.132.213:6900/register \
+  -H "X-API-Key: {{ api_key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"my-agent","agent_url":"http://YOUR_HOST:PORT",
+       "capabilities":["your-capability"],"description":"What I do"}'
+
+# Semantic search
+curl -X POST http://97.107.132.213:6900/search/semantic \
+  -H "X-API-Key: {{ api_key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"transit alert agents","max_results":5}'</div>
+  </div>
+
+  <!-- Agents table -->
+  <div class="section">
+    <h2>Registered Agents <span class="refresh">(refresh page to update)</span></h2>
+    {% if agents %}
+    <table>
+      <thead>
+        <tr>
+          <th>Agent ID</th><th>URL</th><th>Status</th><th>Capabilities</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for agent_id, agent_url in agents.items() %}
+        <tr>
+          <td><strong>{{ agent_id }}</strong></td>
+          <td style="font-family:monospace; font-size:0.8rem; color:#94a3b8">{{ agent_url }}</td>
+          <td>
+            <span class="badge badge-alive">alive</span>
+          </td>
+          <td>—</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">No agents registered yet. Use the snippet above to register your first agent.</p>
+    {% endif %}
+  </div>
+
+  <!-- Federation guide -->
+  <div class="section">
+    <h2>Connect a private registry (federation)</h2>
+    <div class="curl-box"># Link your private registry
+curl -X POST http://97.107.132.213:6900/switchboard/registries \
+  -H "X-API-Key: {{ api_key }}" \
+  -H "Content-Type: application/json" \
+  -d '{"registry_id":"my-private","url":"http://MY_REGISTRY_HOST:6900"}'
+
+# Cross-registry lookup will now resolve agents from both registries</div>
+  </div>
+</main>
+</body>
+</html>

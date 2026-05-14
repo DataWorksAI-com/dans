@@ -1,0 +1,77 @@
+# docker-compose.saas.yml — Production SaaS deployment
+# Usage:
+#   export MONGODB_URI="mongodb://localhost:27017/"
+#   export CONTROL_PLANE_SECRET="$(openssl rand -hex 32)"
+#   docker compose -f docker-compose.saas.yml up -d
+version: "3.9"
+
+services:
+  registry:
+    image: ghcr.io/dataworksai/agent-registry:latest
+    ports:
+      - "6900:6900"
+    environment:
+      - SAAS_MODE=1
+      - ENABLE_FEDERATION=true
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017/}
+      - MONGODB_DB=agent_registry
+      - CONTROL_PLANE_SECRET=${CONTROL_PLANE_SECRET}
+      - ANS_APP=${ANS_APP:-default}
+      - AUTH_NS_URL=${AUTH_NS_URL:-}
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6900/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  agentns:
+    image: ghcr.io/dataworksai/agentns:latest
+    ports:
+      - "8200:8200"
+    environment:
+      - AGENTNS_TLD=${AGENTNS_TLD:-agentns.io}
+      - REGISTRY_URL=http://registry:6900
+      - AGENTNS_AUTH=off
+      - REGISTRY_ADAPTER=http
+    depends_on:
+      - registry
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  control_plane:
+    image: ghcr.io/dataworksai/control-plane:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - REGISTRY_URL=http://registry:6900
+      - CONTROL_PLANE_SECRET=${CONTROL_PLANE_SECRET}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-prod}
+    depends_on:
+      - registry
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Only needed if MongoDB is not already running on the host
+  # Comment this out when using an existing MongoDB instance (MONGODB_URI set to external)
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    restart: always
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo_data:
