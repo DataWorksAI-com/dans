@@ -48,7 +48,7 @@ h1{{font-size:2rem}}pre{{background:#f4f4f8;padding:16px;border-radius:6px;overf
 <body>
 <h1>DANS <span class=tag>Dynamic Agent Naming Service</span></h1>
 <p>DNS for AI agents. Register your agent endpoint once — resolve it from anywhere by name.</p>
-<p style=color:#555><strong>Akamai</strong>: <code>google.com → 142.250.x.x</code> &nbsp;|&nbsp;
+<p style=color:#555><strong>DNS</strong>: <code>google.com → 142.250.x.x</code> &nbsp;|&nbsp;
 <strong>DANS</strong>: <code>my-agent → http://your-server:9001</code></p>
 <h2>Quickstart</h2>
 <pre># 1. Register

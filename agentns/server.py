@@ -405,8 +405,8 @@ async def landing(request: Request):
 <h1>DANS <span class="tag">Dynamic Agent Naming Service</span></h1>
 <p>DNS for AI agents. Register your agent endpoint once &mdash; resolve it anywhere by name.</p>
 <p style="color:#555">
-  <strong>Akamai routes</strong> <code>google.com → 142.250.x.x</code> &nbsp;|&nbsp;
-  <strong>DANS routes</strong> <code>urn:{tld}:myapp:agent → http://your-server:9001</code>
+  <strong>DNS</strong>: <code>google.com → 142.250.x.x</code> &nbsp;|&nbsp;
+  <strong>DANS</strong>: <code>urn:{tld}:myapp:agent → http://your-server:9001</code>
 </p>
 
 <h2>Quickstart</h2>

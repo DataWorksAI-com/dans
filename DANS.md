@@ -3,7 +3,7 @@
 **DNS for AI agents.** Register your agent endpoint once — resolve it from anywhere by name.
 
 ```
-Akamai: google.com  ──── DNS ────►  142.250.80.46   (routes HTTP traffic)
+DNS:    google.com  ──── DNS ────►  142.250.80.46   (routes HTTP traffic)
 DANS:   my-agent    ──── DANS ───►  http://srv:9001  (routes agent calls)
 ```
 
