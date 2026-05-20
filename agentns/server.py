@@ -159,11 +159,42 @@ else:
 _start_time = _time.time()
 
 # ── Federation / Switchboard ───────────────────────────────────────────────────
-# Maps TLD → {url, registry_id, status, added_at}
-# Each entry is a remote agentns instance that owns agents under that TLD.
-# Populated from FEDERATION_REGISTRIES env var at startup, and managed at
-# runtime via POST/DELETE /switchboard/registries.
+# Maps TLD → {url, registry_id, type, status, added_at}
+# Each entry is a remote registry or DANS instance.
+# Populated from FEDERATION_REGISTRIES env var at startup; managed at runtime
+# via POST/DELETE /switchboard/registries; persisted in MongoDB so all workers
+# and restarts see the same state.
 _federation: Dict[str, Dict] = {}
+
+# Periodic refresh from MongoDB — keeps multi-worker deployments in sync.
+# Worker A registers a remote; worker B sees it within _FED_REFRESH_TTL seconds.
+_fed_last_refresh: float = 0.0
+_FED_REFRESH_TTL:  float = 30.0   # seconds between MongoDB re-reads
+
+
+async def _get_federation() -> Dict[str, Dict]:
+    """
+    Return the current federation map, refreshing from MongoDB every 30s.
+    This keeps all uvicorn workers in sync without a shared-memory bus.
+    """
+    global _fed_last_refresh
+    if _fed_col is not None:
+        now = _time.monotonic()
+        if now - _fed_last_refresh > _FED_REFRESH_TTL:
+            try:
+                async for doc in _fed_col.find({}):
+                    tld = doc["tld"]
+                    _federation[tld] = {
+                        "url":         doc["url"],
+                        "registry_id": doc.get("registry_id", tld),
+                        "type":        doc.get("type", "dans"),
+                        "status":      doc.get("status", "configured"),
+                        "added_at":    doc.get("added_at"),
+                    }
+                _fed_last_refresh = now
+            except Exception as exc:
+                logger.warning(f"Federation refresh failed: {exc}")
+    return _federation
 
 
 def _load_federation_from_env() -> None:
@@ -210,14 +241,15 @@ _health_lock = asyncio.Lock()
 _cache = ResolutionCache()
 
 # MongoDB collection handle (None if not configured)
-_mongo_col = None
+_mongo_col  = None
 _tenant_col = None   # tenants collection — None if DANS_AUTH=off or MongoDB unavailable
+_fed_col    = None   # federation collection — persists switchboard registries across restarts
 
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
 
 async def _init_mongo() -> None:
-    global _mongo_col
+    global _mongo_col, _fed_col
     if not MONGODB_URI:
         logger.warning("MONGODB_URI not set — registry is in-memory only (lost on restart)")
         return
@@ -230,6 +262,25 @@ async def _init_mongo() -> None:
         await _mongo_col.create_index([("label", 1), ("endpoint", 1)], unique=True)
         await client.admin.command("ping")
         logger.info(f"MongoDB connected: {MONGODB_DB}.agents")
+
+        # Federation persistence — load saved switchboard entries
+        _fed_col = db["federation"]
+        await _fed_col.create_index("tld", unique=True)
+        loaded = 0
+        async for doc in _fed_col.find({}):
+            tld = doc["tld"]
+            if tld not in _federation:   # env-var entries take precedence
+                _federation[tld] = {
+                    "url":         doc["url"],
+                    "registry_id": doc.get("registry_id", tld),
+                    "type":        doc.get("type", "dans"),
+                    "status":      doc.get("status", "configured"),
+                    "added_at":    doc.get("added_at"),
+                }
+                loaded += 1
+        if loaded:
+            logger.info(f"Switchboard: loaded {loaded} federation entrie(s) from MongoDB")
+
         if DANS_AUTH == "on":
             global _tenant_col
             _tenant_col = await init_tenant_collection(db)
@@ -644,6 +695,85 @@ async def _registry_fallback(label: str, requester_context: dict) -> Optional[Di
     return None
 
 
+# ── Switchboard fan-out (label-only resolve across all connected registries) ───
+
+async def _switchboard_fan_out(label: str, requester_context: dict) -> Optional[Dict]:
+    """
+    Try all connected switchboard registries in parallel for a label that isn't
+    in the local store.
+
+    Two registry types are supported:
+      "dans"     — remote DANS instance  → POST /resolve {label, requester_context}
+      "registry" — plain registry        → POST /resolve {agent_path, requester_context}
+
+    Returns the first successful result, tagged with federated_from + selected_by.
+    Returns None if every registry misses or errors.
+    """
+    fed = await _get_federation()
+    if not fed:
+        return None
+
+    async def _try(tld: str, info: Dict) -> Optional[Dict]:
+        url   = info["url"]
+        rtype = info.get("type", "dans")
+        try:
+            if rtype == "registry":
+                async with httpx.AsyncClient(timeout=6.0) as c:
+                    resp = await c.post(
+                        f"{url}/resolve",
+                        json={"agent_path": label, "requester_context": requester_context},
+                    )
+                if resp.status_code != 200:
+                    return None
+                data     = resp.json()
+                endpoint = data.get("endpoint", "")
+                if not endpoint:
+                    return None
+                logger.info(f"[switchboard] '{label}' resolved via registry:{tld} → {endpoint}")
+                return {
+                    "endpoint":           endpoint,
+                    "url":                endpoint,
+                    "protocol":           data.get("protocol", "http"),
+                    "ttl":                data.get("ttl", 300),
+                    "cached":             False,
+                    "selected_by":        f"switchboard:{tld}",
+                    "federated_from":     url,
+                    "region":             data.get("region", ""),
+                    "region_label":       data.get("region_label", ""),
+                    "flag":               data.get("flag", ""),
+                    "candidates":         [],
+                    "metadata":           data.get("metadata", {}),
+                    "via_proxy":          False,
+                    "slim_identity":      "",
+                    "resolution_time_ms": 0,
+                }
+            else:   # dans
+                async with httpx.AsyncClient(timeout=6.0) as c:
+                    resp = await c.post(
+                        f"{url}/resolve",
+                        json={"label": label, "requester_context": requester_context},
+                    )
+                if resp.status_code != 200:
+                    return None
+                result = resp.json()
+                result["federated_from"] = url
+                result["selected_by"]    = f"switchboard:{tld}"
+                logger.info(f"[switchboard] '{label}' resolved via dans:{tld} → {result.get('endpoint')}")
+                return result
+        except Exception as exc:
+            logger.warning(f"[switchboard] {tld} failed for '{label}': {exc}")
+            return None
+
+    results = await asyncio.gather(
+        *[_try(tld, info) for tld, info in fed.items()],
+        return_exceptions=True,
+    )
+    for r in results:
+        if r and not isinstance(r, Exception):
+            return r
+    return None
+
+
 # ── POST /resolve ──────────────────────────────────────────────────────────────
 
 @app.post("/resolve")
@@ -686,7 +816,7 @@ async def resolve(request: Request, body: dict):
         #   urn:other-tld:ns:label            → forward to the registry that owns other-tld
         #   label  (no TLD)                   → resolve locally
         if parsed.tld and parsed.tld != DEFAULT_TLD:
-            remote = _federation.get(parsed.tld)
+            remote = (await _get_federation()).get(parsed.tld)
             if remote:
                 logger.info(
                     f"Federation: routing urn:{parsed.tld}:... → {remote['url']}"
@@ -726,14 +856,19 @@ async def resolve(request: Request, body: dict):
     # ── lookup ────────────────────────────────────────────────────────────────
     endpoints = _registry.get(label)
     if not endpoints:
-        # Try the optional registry fallback before giving up
+        # 1. Fan out to all connected switchboard registries in parallel
+        sb = await _switchboard_fan_out(label, requester_context)
+        if sb:
+            return sb
+        # 2. Try the single ANS_FALLBACK_URL (backward-compat)
         fb = await _registry_fallback(label, requester_context)
         if fb:
             return fb
         raise HTTPException(
             status_code=404,
             detail=f"No endpoints registered for label '{label}'"
-                   + (f" (also checked {ANS_FALLBACK_URL})" if ANS_FALLBACK_URL else ""),
+                   + (f" (also checked {ANS_FALLBACK_URL})" if ANS_FALLBACK_URL else "")
+                   + (f" (also checked {len(await _get_federation())} switchboard registr(ies))" if _federation else ""),
         )
 
     preferred_protocols = requester_context.get("protocols", [])
@@ -1071,9 +1206,9 @@ async def health():
             "slim_org": SLIM_ORG or None,
         },
         "switchboard": {
-            "enabled":            bool(_federation),
-            "remote_registries":  len(_federation),
-            "tlds":               list(_federation.keys()),
+            "enabled":            bool(await _get_federation()),
+            "remote_registries":  len(await _get_federation()),
+            "tlds":               list((await _get_federation()).keys()),
         },
         "agents": agents_status,
     }
@@ -1145,8 +1280,8 @@ async def switchboard_list():
     List this registry and every connected remote registry.
 
     The first entry is always this local instance. Remaining entries are
-    remote agentns instances registered via POST /switchboard/registries or
-    FEDERATION_REGISTRIES env var.
+    remote registries/DANS instances registered via POST /switchboard/registries
+    or FEDERATION_REGISTRIES env var.
     """
     registries = [
         {
@@ -1160,12 +1295,12 @@ async def switchboard_list():
             "endpoints":   sum(len(v) for v in _registry.values()),
         }
     ]
-    for tld, info in _federation.items():
+    for tld, info in (await _get_federation()).items():
         registries.append({
             "registry_id": info["registry_id"],
             "tld":         tld,
             "url":         info["url"],
-            "type":        "remote",
+            "type":        info.get("type", "dans"),
             "status":      info.get("status", "configured"),
             "added_at":    info.get("added_at"),
         })
@@ -1175,28 +1310,35 @@ async def switchboard_list():
 @app.post("/switchboard/registries")
 async def switchboard_register(body: dict):
     """
-    Connect a remote agentns instance to the switchboard.
+    Connect a remote registry or DANS instance to the switchboard.
 
     Required fields:
-        tld  — the TLD the remote registry owns  e.g. "payments.acme.io"
-        url  — base URL of the remote instance   e.g. "http://payments-agentns:8200"
+        tld  — the TLD / namespace this remote owns  e.g. "agents.northeastern.edu"
+        url  — base URL of the remote               e.g. "http://northeastern-registry.edu"
 
     Optional:
+        type        — "dans" (default) | "registry"
+                      "dans"     = remote DANS instance  → /resolve forwarded with full URN
+                      "registry" = plain capability registry → /resolve called with agent_path
         registry_id — human-readable label (defaults to tld)
 
-    After registering, /resolve requests for URNs whose TLD matches will be
-    automatically forwarded to the remote registry.
+    After connecting, any /resolve for a label or URN not found locally will be
+    fanned out to all connected registries. URNs whose TLD matches exactly are
+    routed directly to that remote.
     """
-    tld = (body.get("tld") or "").strip()
-    url = (body.get("url") or "").strip().rstrip("/")
+    tld  = (body.get("tld") or "").strip()
+    url  = (body.get("url") or "").strip().rstrip("/")
+    rtype = (body.get("type") or "dans").strip().lower()
     if not tld or not url:
         raise HTTPException(400, "'tld' and 'url' are required")
     if tld == DEFAULT_TLD:
         raise HTTPException(400, f"'{tld}' is this instance's own TLD — cannot register as remote")
+    if rtype not in ("dans", "registry"):
+        raise HTTPException(400, "'type' must be 'dans' or 'registry'")
 
     registry_id = (body.get("registry_id") or tld).strip()
 
-    # Probe the remote to confirm it's reachable and report its status
+    # Probe the remote to confirm it's reachable
     remote_status = "unreachable"
     try:
         resp = await _proxy_client.get(
@@ -1207,17 +1349,32 @@ async def switchboard_register(body: dict):
     except Exception:
         pass  # unreachable — still register; it may come up later
 
-    _federation[tld] = {
+    entry = {
         "url":         url,
         "registry_id": registry_id,
+        "type":        rtype,
         "status":      remote_status,
         "added_at":    datetime.now(timezone.utc).isoformat(),
     }
-    logger.info(f"Switchboard: registered tld={tld!r} url={url!r} status={remote_status}")
+    _federation[tld] = entry
+    logger.info(f"Switchboard: connected tld={tld!r} type={rtype!r} url={url!r} status={remote_status}")
+
+    # Persist to MongoDB so this survives a restart
+    if _fed_col is not None:
+        try:
+            await _fed_col.update_one(
+                {"tld": tld},
+                {"$set": {**entry, "tld": tld}},
+                upsert=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Switchboard: MongoDB persist failed for {tld}: {exc}")
+
     return {
-        "status":        "registered",
+        "status":        "connected",
         "tld":           tld,
         "url":           url,
+        "type":          rtype,
         "registry_id":   registry_id,
         "remote_status": remote_status,
     }
@@ -1234,6 +1391,11 @@ async def switchboard_deregister(tld: str):
         raise HTTPException(404, f"No remote registry registered for TLD '{tld}'")
     _federation.pop(tld)
     logger.info(f"Switchboard: removed remote registry tld={tld!r}")
+    if _fed_col is not None:
+        try:
+            await _fed_col.delete_one({"tld": tld})
+        except Exception as exc:
+            logger.warning(f"Switchboard: MongoDB delete failed for {tld}: {exc}")
     return {"status": "removed", "tld": tld}
 
 

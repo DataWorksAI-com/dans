@@ -135,18 +135,34 @@ curl -X POST http://97.107.132.213/dans/register \
   }'
 ```
 
-### Connect your private registry (federation)
+### Connect your registry (federation)
 
-If you run your own registry, you can connect it to the public DANS so agents registered there are also resolvable:
+Connect any registry or DANS instance to the public DANS so its agents are resolvable from anywhere.
 
 ```bash
+# Connect a plain capability registry (DataWorksAI-style, Northeastern, etc.)
 curl -X POST http://97.107.132.213/dans/switchboard/registries \
   -H "Content-Type: application/json" \
   -d '{
-    "tld": "mycompany.agents.io",
-    "url": "http://my-registry:8200"
+    "tld":  "agents.northeastern.edu",
+    "url":  "http://northeastern-registry.edu",
+    "type": "registry"
+  }'
+
+# Connect another DANS instance (peer federation)
+curl -X POST http://97.107.132.213/dans/switchboard/registries \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tld":  "agents.acme.io",
+    "url":  "http://acme-dans:8200",
+    "type": "dans"
   }'
 ```
+
+After connecting:
+- Any `/resolve` for a label not found locally fans out to **all** connected registries in parallel
+- URNs whose TLD matches exactly are routed **directly** to that registry (no fan-out needed)
+- Connections persist across DANS restarts (stored in MongoDB)
 
 ---
 
