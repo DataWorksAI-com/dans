@@ -1,7 +1,7 @@
 """
-agentns — Agent Name Service
-============================
-Single-binary service discovery for multi-agent systems.
+agentns — DANS (Dynamic Agent Naming Service)
+==============================================
+DNS for AI agents. Register your agent endpoint once, resolve it from anywhere by name.
 
 Quick start — requester agent (resolve other agents)
 -----------------------------------------------------
@@ -26,12 +26,15 @@ Quick start — target agent (register yourself)
 Start the server
 ----------------
     # Via CLI:
-    agentns-server --port 8200
+    python -m agentns
 
     # Via Python:
     import uvicorn
     from agentns.server import app
     uvicorn.run(app, host="0.0.0.0", port=8200)
+
+    # Public instance (no setup needed):
+    AGENTNS_URL=http://97.107.132.213/dans
 
 Environment variables
 ---------------------
@@ -40,13 +43,11 @@ Environment variables
     AGENTNS_TLD              URN TLD                       (default: "agentns.local")
     AGENTNS_URL              Client → server URL           (default: http://localhost:8200)
     AGENTNS_RESOLVER_URL     Requester client resolver URL (defaults to AGENTNS_URL)
-    ANS_TLD                  URN TLD for AgentName.from_label()
-    ANS_APP                  URN namespace for AgentName.from_label()
-    REGISTRY_ADAPTER         Registry backend: http|static|multi (default: http)
-    REGISTRY_URL             HTTP registry URL             (default: http://localhost:6900)
-    REGISTRY_YAML            Static registry YAML file     (for REGISTRY_ADAPTER=static)
-    REGISTRY_URLS            Comma-separated registry URLs (for REGISTRY_ADAPTER=multi)
+    AGENTNS_API_KEY          API key for authenticated resolvers
+    DANS_AUTH                "off" (default) | "on" — require X-API-Key on writes
+    ANS_FALLBACK_URL         Optional fallback registry URL
     MONGODB_URI              MongoDB connection string     (optional; in-memory if absent)
+    MONGODB_DB               MongoDB database name         (default: ans_public)
 """
 
 __version__ = "3.0.0"

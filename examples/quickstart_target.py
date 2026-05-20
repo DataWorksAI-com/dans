@@ -1,21 +1,23 @@
 """
 quickstart_target.py
 ====================
-Minimal example: register your agent with agentns at startup.
-
-Call this from your agent's startup code so other agents can discover it.
+Minimal example: register your agent with DANS at startup.
 
 Prerequisites:
     pip install agentns
-    AGENTNS_AUTH=off agentns-server --port 8200   (in another terminal)
 
-Environment (optional — defaults work for local dev):
-    AGENTNS_URL=http://localhost:8200
-    AGENTNS_API_KEY=your-key          # required if server has auth enabled
+Point to the public DANS instance (no setup needed):
+    export AGENTNS_URL=http://97.107.132.213/dans
+
+Or run your own locally:
+    docker compose up -d
+    export AGENTNS_URL=http://localhost:8200
+
+If DANS_AUTH=on, also set:
+    export AGENTNS_API_KEY=dk_live_your_key_here
 """
 
 import asyncio
-import atexit
 import agentns
 
 MY_LABEL    = "my-agent"
@@ -47,7 +49,7 @@ async def main():
     client = await register()
 
     print(f"\n'{MY_LABEL}' is now discoverable at {MY_ENDPOINT}")
-    print("Other agents can find it with:")
+    print("Other agents can resolve it with:")
     print(f"  endpoint = await resolver_client.resolve(Query.from_label('{MY_LABEL}'))")
     print("\nPress Ctrl+C to deregister and exit.\n")
 

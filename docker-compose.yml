@@ -1,24 +1,8 @@
-# docker-compose.yml — Local development (single-tenant, no auth, no MongoDB required)
+# docker-compose.yml — Local development (in-memory, no MongoDB required)
+# For a persistent deployment use docker-compose.dans.yml
 version: "3.9"
 
 services:
-  registry:
-    build:
-      context: .
-      dockerfile: Dockerfile.registry
-    ports:
-      - "6900:6900"
-    environment:
-      - TEST_MODE=0
-      - SAAS_MODE=0
-      - ENABLE_FEDERATION=false
-      - MONGODB_URI=mongodb://mongo:27017/
-      - MONGODB_DB=agent_registry
-    depends_on:
-      mongo:
-        condition: service_healthy
-    restart: unless-stopped
-
   agentns:
     build:
       context: .
@@ -27,24 +11,8 @@ services:
       - "8200:8200"
     environment:
       - AGENTNS_TLD=agentns.local
-      - REGISTRY_URL=http://registry:6900
-      - AGENTNS_AUTH=off
-    depends_on:
-      - registry
+      - AGENTNS_NAMESPACE=default
+      - DANS_AUTH=off
+      # Uncomment to wire a fallback registry:
+      # - ANS_FALLBACK_URL=http://your-registry:6900
     restart: unless-stopped
-
-  mongo:
-    image: mongo:7
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-volumes:
-  mongo_data:
