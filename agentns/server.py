@@ -576,7 +576,7 @@ curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</p
 </table>
 
 <p style="margin-top:32px;color:#888;font-size:.85rem">
-  Powered by <a href="https://github.com/dataworksai/agent-registry">DataWorksAI agent-registry</a> &nbsp;&middot;&nbsp;
+  Powered by <a href="https://github.com/DataWorksAI-com/dans">DataWorksAI DANS</a> &nbsp;&middot;&nbsp;
   <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a>
 </p>
 </body></html>"""
