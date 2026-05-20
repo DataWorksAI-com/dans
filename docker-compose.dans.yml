@@ -1,0 +1,55 @@
+# docker-compose.dans.yml — Standalone DANS (Dynamic Agent Naming Service)
+#
+# Runs a single agentns container as a fully independent public name-resolution service.
+# No registry, no control plane, no other dependencies.
+#
+# Usage:
+#   export MONGODB_URI="mongodb+srv://user:pass@cluster.mongodb.net/"
+#   docker compose -f docker-compose.dans.yml up -d
+#
+# Public endpoints after startup:
+#   POST /register   — register your agent
+#   POST /resolve    — resolve agent name → endpoint
+#   GET  /health     — service health + all registered agents
+#   GET  /           — landing page (open in browser)
+#
+# Optional: set ANS_FALLBACK_URL to a capability-based registry so DANS can
+# fall back to it when a label isn't registered locally.
+#   ANS_FALLBACK_URL=http://my-registry:6900
+
+services:
+  agentns:
+    image: agentns:live
+    ports:
+      - "8200:8200"
+    environment:
+      # DANS identity — what URNs this instance issues
+      - AGENTNS_TLD=${AGENTNS_TLD:-agents.dataworksai.com}
+      - AGENTNS_NAMESPACE=${AGENTNS_NAMESPACE:-public}
+
+      # Persistence — omit MONGODB_URI for in-memory only (resets on restart)
+      - MONGODB_URI=${MONGODB_URI:-}
+      - MONGODB_DB=${MONGODB_DB:-ans_public}
+
+      # Auth — off for a public open service; set to "key" to require X-API-Key
+      - AGENTNS_AUTH=${AGENTNS_AUTH:-off}
+
+      # Performance
+      - AGENTNS_WORKERS=${AGENTNS_WORKERS:-2}
+      - AGENTNS_HEALTH_INTERVAL=${AGENTNS_HEALTH_INTERVAL:-30}
+
+      # Optional: fall back to a capability registry when label not found locally
+      # Leave blank for fully standalone mode
+      - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}
+
+      # Optional: federation — connect to other DANS instances
+      # Format: JSON {"other-tld":"http://other-dans:8200"} or CSV tld=url,...
+      - FEDERATION_REGISTRIES=${FEDERATION_REGISTRIES:-}
+
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

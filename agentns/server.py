@@ -1,7 +1,7 @@
 """
 agentns.server
 ==============
-Single-binary Agent Name Service sidecar with built-in switchboard federation.
+Single-binary Dynamic Agent Naming Service (DANS) sidecar with built-in switchboard federation.
 
 Combines all three resolution hops into one process:
 
@@ -106,6 +106,13 @@ DEFAULT_TLD      = os.getenv("AGENTNS_TLD",                 "agentns.local")
 HEALTH_INTERVAL  = int(os.getenv("AGENTNS_HEALTH_INTERVAL", "30"))
 MONGODB_URI      = os.getenv("MONGODB_URI",                 "")
 MONGODB_DB       = os.getenv("MONGODB_DB",                  "agentns")
+
+# ── Optional registry fallback ─────────────────────────────────────────────────
+# When ANS_FALLBACK_URL is set, /resolve tries this registry URL before returning 404.
+# Useful for bridging to an existing capability-based registry (e.g. DataWorksAI registry).
+# Leave unset for a fully standalone ANS instance.
+#   ANS_FALLBACK_URL=http://my-registry:6900
+ANS_FALLBACK_URL = os.getenv("ANS_FALLBACK_URL", "").rstrip("/")
 
 # ── A2A Proxy config (optional — when set, /resolve returns proxy URL) ─────────
 #
@@ -344,7 +351,7 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(
-    title="agentns — Agent Name Service",
+    title="DANS — Dynamic Agent Naming Service",
     description=(
         "Single-binary service discovery sidecar for multi-agent systems.\n\n"
         "Register agents with POST /register. Resolve them with POST /resolve using "
@@ -366,6 +373,83 @@ if _RATE_LIMIT_AVAILABLE:
     logger.info("Rate limiting enabled (slowapi)")
 else:
     logger.warning("slowapi not installed — rate limiting disabled. pip install agentns[server]")
+
+
+# ── Landing page (GET /) ──────────────────────────────────────────────────────
+
+@app.get("/", include_in_schema=False)
+async def landing(request: Request):
+    """Return a human-readable landing page for browser visits; JSON for API clients."""
+    if "text/html" not in request.headers.get("accept", ""):
+        return {"service": "agentns", "version": "3.0.0",
+                "docs": "/docs", "health": "/health"}
+    tld = DEFAULT_TLD
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DANS — Dynamic Agent Naming Service</title>
+<style>
+  body{{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1a1a2e}}
+  h1{{font-size:2rem;margin-bottom:.25em}}
+  .tag{{background:#e8f4fd;color:#1565c0;padding:2px 10px;border-radius:4px;font-size:.85rem}}
+  pre{{background:#f4f4f8;padding:16px;border-radius:6px;overflow-x:auto;font-size:.85rem}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:24px 0}}
+  .card{{background:#f9f9fc;border:1px solid #e2e2f0;border-radius:8px;padding:16px}}
+  .card h3{{margin:0 0 8px;font-size:1rem}}
+  a{{color:#1565c0}}
+  table{{border-collapse:collapse;width:100%}}
+  th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid #eee;font-size:.9rem}}
+  th{{background:#f4f4f8;font-weight:600}}
+</style></head>
+<body>
+<h1>DANS <span class="tag">Dynamic Agent Naming Service</span></h1>
+<p>DNS for AI agents. Register your agent endpoint once &mdash; resolve it anywhere by name.</p>
+<p style="color:#555">
+  <strong>Akamai routes</strong> <code>google.com → 142.250.x.x</code> &nbsp;|&nbsp;
+  <strong>DANS routes</strong> <code>urn:{tld}:myapp:agent → http://your-server:9001</code>
+</p>
+
+<h2>Quickstart</h2>
+<pre># 1. Register your agent
+curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/register \\
+  -H "Content-Type: application/json" \\
+  -d '{{"label": "my-agent", "endpoint": "http://your-server:9001"}}'
+
+# 2. Resolve from anywhere
+curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/resolve \\
+  -H "Content-Type: application/json" \\
+  -d '{{"agent_name": "my-agent"}}'
+
+# 3. See all registered agents
+curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</pre>
+
+<h2>What DANS adds</h2>
+<div class="grid">
+  <div class="card"><h3>Stable naming</h3>Agent moves servers? Just re-register. All callers keep using the same name.</div>
+  <div class="card"><h3>Health-aware routing</h3>DANS skips unhealthy endpoints and routes to the best available instance.</div>
+  <div class="card"><h3>Geo-routing</h3>Register multiple instances with locations &mdash; DANS picks the nearest one for each caller.</div>
+  <div class="card"><h3>Federation</h3>Connect multiple DANS instances together, like DNS zones. Resolve agents across networks.</div>
+</div>
+
+<h2>API Reference</h2>
+<table>
+<tr><th>Method</th><th>Path</th><th>Description</th></tr>
+<tr><td>POST</td><td>/register</td><td>Register an agent endpoint</td></tr>
+<tr><td>POST</td><td>/resolve</td><td>Resolve agent name → endpoint URL</td></tr>
+<tr><td>DELETE</td><td>/register/{{label}}</td><td>Deregister an endpoint</td></tr>
+<tr><td>GET</td><td>/health</td><td>Service health + all registered agents</td></tr>
+<tr><td>GET</td><td>/agents</td><td>List registered agents</td></tr>
+<tr><td>POST</td><td>/switchboard/registries</td><td>Connect a remote registry (federation)</td></tr>
+<tr><td>GET</td><td>/docs</td><td>Interactive API docs (Swagger UI)</td></tr>
+</table>
+
+<p style="margin-top:32px;color:#888;font-size:.85rem">
+  Powered by <a href="https://github.com/dataworksai/agent-registry">DataWorksAI agent-registry</a> &nbsp;&middot;&nbsp;
+  <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a>
+</p>
+</body></html>"""
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(content=html)
 
 
 # ── Proxy helpers ─────────────────────────────────────────────────────────────
@@ -433,6 +517,50 @@ async def _federated_resolve(remote_url: str, body: Dict) -> Dict:
         raise HTTPException(504, f"Remote registry at {remote_url} timed out")
     except Exception as exc:
         raise HTTPException(502, f"Federation error forwarding to {remote_url}: {exc}")
+
+
+# ── Optional registry fallback ────────────────────────────────────────────────
+
+async def _registry_fallback(label: str, requester_context: dict) -> Optional[Dict]:
+    """
+    Try ANS_FALLBACK_URL (e.g. a DataWorksAI registry) when the label isn't in
+    the local store.  Returns a resolve-shaped dict on success, None otherwise.
+    Only active when ANS_FALLBACK_URL is set.
+    """
+    if not ANS_FALLBACK_URL:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as _hc:
+            resp = await _hc.post(
+                f"{ANS_FALLBACK_URL}/resolve",
+                json={"agent_path": label, "requester_context": requester_context},
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            endpoint = data.get("endpoint", "")
+            if endpoint:
+                logger.info(f"[fallback] Resolved '{label}' via {ANS_FALLBACK_URL} → {endpoint}")
+                return {
+                    "endpoint":           endpoint,
+                    "url":                endpoint,
+                    "agent_id":           label,
+                    "protocol":           data.get("protocol", "http"),
+                    "ttl":                data.get("ttl", 300),
+                    "cached":             False,
+                    "resolution_time_ms": 0,
+                    "is_foreign":         False,
+                    "selected_by":        "registry-fallback",
+                    "region":             "",
+                    "region_label":       "",
+                    "flag":               "",
+                    "candidates":         [],
+                    "metadata":           data.get("metadata", {}),
+                    "via_proxy":          False,
+                    "slim_identity":      "",
+                }
+    except Exception as _exc:
+        logger.warning(f"[fallback] Registry lookup failed for '{label}': {_exc}")
+    return None
 
 
 # ── POST /resolve ──────────────────────────────────────────────────────────────
@@ -509,7 +637,15 @@ async def resolve(request: Request, body: dict):
     # ── lookup ────────────────────────────────────────────────────────────────
     endpoints = _registry.get(label)
     if not endpoints:
-        raise HTTPException(status_code=404, detail=f"No endpoints registered for label '{label}'")
+        # Try the optional registry fallback before giving up
+        fb = await _registry_fallback(label, requester_context)
+        if fb:
+            return fb
+        raise HTTPException(
+            status_code=404,
+            detail=f"No endpoints registered for label '{label}'"
+                   + (f" (also checked {ANS_FALLBACK_URL})" if ANS_FALLBACK_URL else ""),
+        )
 
     preferred_protocols = requester_context.get("protocols", [])
 
@@ -1145,7 +1281,7 @@ def main() -> None:
     """CLI entry point: ``agentns-server`` or ``python -m agentns``."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="agentns — Agent Name Service sidecar")
+    parser = argparse.ArgumentParser(description="agentns — Dynamic Agent Naming Service (DANS) sidecar")
     parser.add_argument("--port",     type=int, default=PORT,            help="HTTP port (default: 8200)")
     parser.add_argument("--host",     type=str, default="0.0.0.0",       help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--log-level",type=str, default="info",          help="Log level (default: info)")

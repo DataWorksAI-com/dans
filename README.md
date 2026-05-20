@@ -88,7 +88,7 @@ All endpoints (except `/health` and `/stats`) require `X-API-Key` when `SAAS_MOD
 | `GET`  | `/search?q=&capabilities=&tags=` | Simple search |
 | `POST` | `/search/semantic` | Semantic keyword search |
 | `PUT`  | `/agents/<id>/status` | Update agent metadata |
-| `POST` | `/resolve` | ANS TLD resolve |
+| `POST` | `/resolve` | DANS TLD resolve |
 | `GET`  | `/health` | Service health |
 | `GET`  | `/stats` | Registry statistics |
 | `POST` | `/switchboard/registries` | Link a remote registry |
