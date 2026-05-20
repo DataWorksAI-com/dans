@@ -1,214 +1,101 @@
-# DataWorksAI Agent Registry
+# DANS — Dynamic Agent Naming Service
 
-**Hosted semantic agent discovery for multi-agent systems.**
+DNS for AI agents. Register your agent endpoint once — resolve it from anywhere by name.
 
-Live service: `http://97.107.132.213:6900` · Dashboard: `http://97.107.132.213:8080`
+```
+DNS:    google.com → 142.250.80.46    (routes HTTP traffic)
+DANS:   my-agent   → http://srv:9001  (routes agent calls)
+```
 
----
+## Live Service
 
-## What's in this repo
+**Public endpoint:** `http://97.107.132.213/dans/`
 
-| Directory | What it does | Port |
-|-----------|-------------|------|
-| `registry/` | Flask semantic registry — agent search, SaaS multi-tenancy, switchboard federation | 6900 |
-| `agentns/` | FastAPI DNS-like sidecar — URN routing, health checking, geo-selection | 8200 |
-| `control_plane/` | Signup portal + live agent dashboard | 8080 |
-| `tests/` | 40+ pytest tests for agentns sidecar |
-| `.github/workflows/` | GitHub Actions CI/CD → auto-deploy to production on push to `main` |
+No signup required for resolving. Sign up only to register your namespace.
 
----
+## Quickstart
 
-## Quick start (use the hosted service)
+### Register your agent (needs namespace signup)
 
 ```bash
-# 1. Get a free API key at http://97.107.132.213:8080
-
-# 2. Register your agent
-curl -X POST http://97.107.132.213:6900/register \
-  -H "X-API-Key: ak_live_..." \
+# 1. Claim your namespace (one-time)
+curl -X POST http://97.107.132.213/dans/signup \
   -H "Content-Type: application/json" \
-  -d '{
-    "agent_id":    "my-agent",
-    "agent_url":   "http://myhost:9000",
-    "capabilities":["chat","summarisation"],
-    "description": "General purpose assistant",
-    "tags":        ["production"]
-  }'
+  -d '{"email": "you@example.com", "namespace": "myco"}'
+# → {"api_key": "dk_live_...", "namespace": "myco"}  — save this key
 
-# 3. Semantic search
-curl -X POST http://97.107.132.213:6900/search/semantic \
-  -H "X-API-Key: ak_live_..." \
+# 2. Register your agent at startup
+curl -X POST http://97.107.132.213/dans/register \
   -H "Content-Type: application/json" \
-  -d '{"query": "find agents that can summarise documents", "max_results": 5}'
-
-# 4. Lookup by ID
-curl http://97.107.132.213:6900/agents/my-agent \
-  -H "X-API-Key: ak_live_..."
+  -H "X-API-Key: dk_live_..." \
+  -d '{"label": "weather", "namespace": "myco", "endpoint": "http://your-server:9001"}'
 ```
 
----
-
-## SDK (Python)
-
-```python
-import agentns
-
-# ── Register your agent at startup ─────────────────────────────────────────────
-client = agentns.target_lib.connect()          # reads AGENTNS_URL env var
-await client.record(agentns.DeploymentSpec(
-    leaf_name  = "my-agent",
-    a2a_url    = "http://myhost:9000",
-    region     = "us-east",
-    protocols  = ["A2A"],
-))
-
-# ── Resolve another agent ───────────────────────────────────────────────────────
-resolver = agentns.requester_lib.connect()     # reads AGENTNS_URL env var
-endpoint  = await resolver.resolve(agentns.Query.from_label("alerts"))
-if endpoint:
-    print(endpoint.url)      # → http://host:port
-    print(endpoint.ttl)      # → 60
-```
-
-Install: `pip install agentns` (or `pip install -e ./agentns` from this repo)
-
----
-
-## Registry API
-
-All endpoints (except `/health` and `/stats`) require `X-API-Key` when `SAAS_MODE=1`.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/register` | Register an agent |
-| `GET`  | `/agents/<id>` | Get agent by ID |
-| `DELETE` | `/agents/<id>` | Remove agent |
-| `GET`  | `/lookup/<id>` | Lookup agent or client |
-| `GET`  | `/list` | List all agents |
-| `GET`  | `/search?q=&capabilities=&tags=` | Simple search |
-| `POST` | `/search/semantic` | Semantic keyword search |
-| `PUT`  | `/agents/<id>/status` | Update agent metadata |
-| `POST` | `/resolve` | DANS TLD resolve |
-| `GET`  | `/health` | Service health |
-| `GET`  | `/stats` | Registry statistics |
-| `POST` | `/switchboard/registries` | Link a remote registry |
-| `GET`  | `/switchboard/registries` | List connected registries |
-| `GET`  | `/switchboard/lookup/<id>` | Cross-registry lookup |
-
-### Register payload
-
-```json
-{
-  "agent_id":    "alerts",
-  "agent_url":   "http://host:9001",
-  "api_url":     "http://host:9001/api",
-  "health_url":  "http://host:9001/health",
-  "description": "Sends alerts for transit delays",
-  "capabilities":["alerting","transit"],
-  "tags":        ["production","mbta"],
-  "agent_name":  "urn:agents.dataworksai.io:mbta:alerts"
-}
-```
-
----
-
-## Switchboard federation
-
-Connect your private registry so cross-registry lookups work transparently:
+### Resolve any agent (no key needed)
 
 ```bash
-# Link a private registry
-curl -X POST http://97.107.132.213:6900/switchboard/registries \
-  -H "X-API-Key: ak_live_..." \
+curl -X POST http://97.107.132.213/dans/resolve \
   -H "Content-Type: application/json" \
-  -d '{"registry_id": "my-private", "url": "http://my-internal:6900"}'
-
-# Now lookup will search both registries
-curl http://97.107.132.213:6900/switchboard/lookup/my-private-agent
+  -d '{"agent_name": "urn:agents.dataworksai.com:myco:weather"}'
+# → {"endpoint": "http://your-server:9001", ...}
 ```
 
----
+## Why namespaces?
 
-## Self-hosting
+Two developers can both name their agent `weather`. Namespaces keep them separate:
 
-### Local dev (no auth, MongoDB optional)
+| Developer | Namespace | Full URN |
+|-----------|-----------|----------|
+| Acme Corp | `acme` | `urn:agents.dataworksai.com:acme:weather` |
+| Other Co  | `otherco` | `urn:agents.dataworksai.com:otherco:weather` |
+
+## Repo Structure
+
+```
+dans/
+├── agentns/              ← DANS service (FastAPI)
+│   ├── server.py         ← main server: /register /resolve /signup /health
+│   ├── tenant.py         ← namespace ownership + API key management
+│   ├── auth.py           ← security headers middleware
+│   ├── cache.py          ← TTL resolution cache
+│   ├── geocoder.py       ← city → lat/lon for geo-routing
+│   ├── health_checker.py ← background endpoint health probing
+│   ├── server_selection.py ← geo + latency ranking
+│   ├── urn_parser.py     ← URN parse/build utilities
+│   ├── requester_lib.py  ← SDK: resolve agents (caller side)
+│   └── target_lib.py     ← SDK: register agents (target side)
+├── registry/             ← DataWorksAI capability registry (separate service)
+├── control_plane/        ← Signup dashboard UI
+├── tests/                ← Test suite
+├── scripts/              ← Operational scripts
+├── Dockerfile.agentns    ← DANS container
+├── docker-compose.dans.yml   ← Standalone DANS deployment
+├── docker-compose.yml    ← Full stack (dev)
+├── docker-compose.saas.yml ← Full stack (production)
+├── DANS.md               ← Full API reference
+└── README.md             ← This file
+```
+
+## Self-host DANS
 
 ```bash
-docker compose up
-# Registry → :6900, agentns → :8200, MongoDB → :27017
+# With MongoDB persistence + auth enabled
+MONGODB_URI="mongodb+srv://..." DANS_AUTH=on \
+  docker compose -f docker-compose.dans.yml up -d
+
+# Open mode (no auth, in-memory)
+docker compose -f docker-compose.dans.yml up -d
 ```
 
-### Production (SaaS mode, all 3 services)
+## API Reference
 
-```bash
-cp .env.example .env
-# Edit .env: set MONGODB_URI, CONTROL_PLANE_SECRET, SECRET_KEY
-
-docker compose -f docker-compose.saas.yml up -d
-# Registry → :6900, Control plane → :8080, agentns → :8200
-```
-
----
-
-## CI/CD (GitHub Actions)
-
-Every push to `main` automatically:
-1. Builds 3 Docker images → pushes to `ghcr.io/dataworksai-com/`
-2. SSHes to `97.107.132.213` and runs `docker compose pull && up -d`
-
-**Required GitHub secrets:**
-
-| Secret | Value |
-|--------|-------|
-| `DEPLOY_SSH_KEY` | Private SSH key for `root@97.107.132.213` |
-
-**Required GitHub variables** (already set):
-
-| Variable | Value |
-|----------|-------|
-| `DEPLOY_HOST` | `97.107.132.213` |
-| `DEPLOY_USER` | `root` |
-
-Add `DEPLOY_SSH_KEY`: Settings → Secrets → Actions → New repository secret.
-
----
-
-## Architecture
-
-```
-Customer agent
-     │
-     ▼  X-API-Key
-┌─────────────────────────────────────────────────┐
-│         registry/ (Flask, port 6900)            │
-│                                                  │
-│  /register   /search/semantic   /lookup/<id>    │
-│  /resolve    /agents/<id>       /stats          │
-│  /switchboard/…  (federation)                   │
-│                                                  │
-│  SAAS_MODE=1 → tenants MongoDB collection        │
-│               tenant_id scoped registry dict    │
-└──────────────────┬──────────────────────────────┘
-                   │ (optional: routing layer)
-     ┌─────────────▼───────────────┐
-     │  agentns/ (FastAPI, :8200)  │
-     │  URN resolve, health sweep  │
-     │  geo-selection, caching     │
-     └─────────────────────────────┘
-                   │
-     ┌─────────────▼───────────────┐
-     │  MongoDB (agents, tenants)  │
-     └─────────────────────────────┘
-
-     ┌─────────────────────────────┐
-     │  control_plane/ (:8080)     │
-     │  Signup → API key issued    │
-     │  Dashboard → live agent UI  │
-     └─────────────────────────────┘
-```
-
----
-
-## License
-
-MIT
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/signup` | None | Claim namespace, get API key |
+| `POST` | `/register` | Key (if auth=on) | Register agent endpoint |
+| `POST` | `/resolve` | None | Resolve agent name → endpoint |
+| `DELETE` | `/register/{label}` | Key (if auth=on) | Deregister endpoint |
+| `GET` | `/namespaces/{ns}` | None | Check if namespace is available |
+| `GET` | `/health` | None | All registered agents + health |
+| `POST` | `/switchboard/registries` | None | Connect remote registry |
+| `GET` | `/docs` | None | Swagger UI |

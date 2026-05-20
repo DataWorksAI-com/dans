@@ -39,8 +39,8 @@ jobs:
           file: Dockerfile.registry
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG }}/agent-registry:latest
-            ${{ env.REGISTRY }}/${{ env.ORG }}/agent-registry:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.ORG }}/dans:latest
+            ${{ env.REGISTRY }}/${{ env.ORG }}/dans:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -87,11 +87,11 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            cd /opt/agent-registry
+            cd /opt/dans
 
             # Pull latest compose file
             curl -fsSL \
-              https://raw.githubusercontent.com/dataworksai/agent-registry/main/docker-compose.saas.yml \
+              https://raw.githubusercontent.com/dataworksai/dans/main/docker-compose.saas.yml \
               -o docker-compose.saas.yml
 
             # Log in to GHCR
@@ -106,7 +106,8 @@ jobs:
             sleep 10
             curl -sf http://localhost:6900/health || (echo "Registry health check failed" && exit 1)
             curl -sf http://localhost:8080/health || (echo "Control plane health check failed" && exit 1)
-            echo "✅ Deploy successful"
+            curl -sf http://localhost:8200/health || (echo "agentns health check failed" && exit 1)
+            echo "Deploy successful"
 
   # ── Run tests ────────────────────────────────────────────────────────────────
   test:

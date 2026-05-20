@@ -7,6 +7,10 @@
 #   export MONGODB_URI="mongodb+srv://user:pass@cluster.mongodb.net/"
 #   docker compose -f docker-compose.dans.yml up -d
 #
+# Auth control:
+#   DANS_AUTH=off   — open service, no key required (default)
+#   DANS_AUTH=on    — require X-API-Key for /register and /deregister
+#
 # Public endpoints after startup:
 #   POST /register   — register your agent
 #   POST /resolve    — resolve agent name → endpoint
@@ -33,6 +37,7 @@ services:
 
       # Auth — off for a public open service; set to "key" to require X-API-Key
       - AGENTNS_AUTH=${AGENTNS_AUTH:-off}
+      - DANS_AUTH=${DANS_AUTH:-off}
 
       # Performance
       - AGENTNS_WORKERS=${AGENTNS_WORKERS:-2}

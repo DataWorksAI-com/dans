@@ -72,6 +72,7 @@ from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
 from .server_selection import rank_servers, select_protocol, calculate_ttl
 from .urn_parser       import parse_urn, build_urn
+from .tenant           import create_tenant, get_tenant_by_key, namespace_available, init_tenant_collection
 
 # ── logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -113,6 +114,10 @@ MONGODB_DB       = os.getenv("MONGODB_DB",                  "agentns")
 # Leave unset for a fully standalone ANS instance.
 #   ANS_FALLBACK_URL=http://my-registry:6900
 ANS_FALLBACK_URL = os.getenv("ANS_FALLBACK_URL", "").rstrip("/")
+
+# DANS_AUTH — "on" requires X-API-Key on write endpoints (register/deregister)
+# "off" (default) runs open — suitable for internal/sidecar use
+DANS_AUTH = os.getenv("DANS_AUTH", "off").lower().strip()
 
 # ── A2A Proxy config (optional — when set, /resolve returns proxy URL) ─────────
 #
@@ -206,6 +211,7 @@ _cache = ResolutionCache()
 
 # MongoDB collection handle (None if not configured)
 _mongo_col = None
+_tenant_col = None   # tenants collection — None if DANS_AUTH=off or MongoDB unavailable
 
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
@@ -224,6 +230,10 @@ async def _init_mongo() -> None:
         await _mongo_col.create_index([("label", 1), ("endpoint", 1)], unique=True)
         await client.admin.command("ping")
         logger.info(f"MongoDB connected: {MONGODB_DB}.agents")
+        if DANS_AUTH == "on":
+            global _tenant_col
+            _tenant_col = await init_tenant_collection(db)
+            logger.info("Tenant collection ready (DANS_AUTH=on)")
     except Exception as exc:
         logger.error(f"MongoDB connection failed ({exc}) — running without persistence")
         _mongo_col = None
@@ -333,6 +343,7 @@ async def lifespan(application: FastAPI):
     task = asyncio.create_task(_health_loop())
 
     total = sum(len(v) for v in _registry.values())
+    logger.info(f"DANS auth mode: {DANS_AUTH}")
     logger.info(f"agentns ready — {total} endpoint(s) across {len(_registry)} label(s) | port {PORT}")
     if _PROXY_ENDPOINTS:
         logger.info(f"A2A proxy enabled — mode={_PROXY_MODE} endpoint={_PROXY_ENDPOINTS[0]}")
@@ -356,8 +367,11 @@ app = FastAPI(
         "Single-binary service discovery sidecar for multi-agent systems.\n\n"
         "Register agents with POST /register. Resolve them with POST /resolve using "
         "standard URNs (urn:tld:namespace:label). Language-agnostic HTTP API.\n\n"
-        "No authentication required — designed for sidecar/internal network deployments. "
-        "For public deployments, place behind a reverse proxy that handles auth at the edge."
+        "**Namespace ownership**: Sign up at POST /signup to claim a namespace and get an API key. "
+        "When DANS_AUTH=on, the X-API-Key header is required on write endpoints (register/deregister). "
+        "Check namespace availability with GET /namespaces/{namespace}.\n\n"
+        "DANS_AUTH=off (default) runs fully open — suitable for internal/sidecar deployments. "
+        "For public deployments, set DANS_AUTH=on and use MongoDB (MONGODB_URI)."
     ),
     version="3.0.0",
     lifespan=lifespan,
@@ -373,6 +387,73 @@ if _RATE_LIMIT_AVAILABLE:
     logger.info("Rate limiting enabled (slowapi)")
 else:
     logger.warning("slowapi not installed — rate limiting disabled. pip install agentns[server]")
+
+
+# ── POST /signup ───────────────────────────────────────────────────────────────
+
+@app.post("/signup", status_code=201)
+async def signup(body: dict):
+    """
+    Claim a namespace and get an API key.
+
+    Required:
+        email      — contact email
+        namespace  — the namespace you want to own (e.g. "acme")
+                     All your agents will be under urn:...:acme:{label}
+
+    Returns:
+        api_key    — shown ONCE, store it securely
+        namespace  — confirmed namespace
+        example    — example register call
+
+    Once issued, your key is the only credential that can register
+    agents under your namespace.
+    """
+    email     = (body.get("email") or "").strip().lower()
+    namespace = (body.get("namespace") or "").strip().lower()
+
+    if not email or "@" not in email:
+        raise HTTPException(400, "Valid 'email' is required")
+    if not namespace:
+        raise HTTPException(400, "'namespace' is required")
+    if not namespace.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(400, "Namespace must be alphanumeric (hyphens/underscores allowed)")
+    if len(namespace) < 2 or len(namespace) > 40:
+        raise HTTPException(400, "Namespace must be 2-40 characters")
+
+    if DANS_AUTH != "on":
+        raise HTTPException(503, "Signup requires DANS_AUTH=on. This instance runs in open mode.")
+
+    if _tenant_col is None:
+        raise HTTPException(503, "MongoDB required for signup (MONGODB_URI not configured)")
+
+    try:
+        tenant = await create_tenant(_tenant_col, email, namespace)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+    return {
+        "status":    "created",
+        "api_key":   tenant["api_key"],
+        "namespace": namespace,
+        "warning":   "Store your API key securely — it is shown only once",
+        "example": {
+            "register": f'curl -X POST .../register -H "X-API-Key: {tenant["api_key"][:20]}..." '
+                        f'-d \'{{"label":"my-agent","namespace":"{namespace}","endpoint":"http://your-server:9001"}}\'',
+        },
+    }
+
+
+@app.get("/namespaces/{namespace}")
+async def check_namespace(namespace: str):
+    """Check if a namespace is available to claim."""
+    available = await namespace_available(_tenant_col, namespace)
+    return {
+        "namespace": namespace,
+        "available": available,
+        "message":   "Available — claim it with POST /signup" if available
+                     else f"'{namespace}' is already claimed",
+    }
 
 
 # ── Landing page (GET /) ──────────────────────────────────────────────────────
@@ -586,6 +667,14 @@ async def resolve(request: Request, body: dict):
     requester_context = body.get("requester_context") or {}
     cache_enabled     = body.get("cache_enabled", True)
 
+    # Enrich requester_context with caller's namespace if they provide a key
+    if DANS_AUTH == "on" and "namespace" not in requester_context:
+        _rk = request.headers.get("X-API-Key", "")
+        if _rk:
+            _rt = await get_tenant_by_key(_tenant_col, _rk)
+            if _rt:
+                requester_context = {**requester_context, "requester_namespace": _rt["namespace"]}
+
     if agent_name:
         parsed = parse_urn(agent_name)
 
@@ -797,6 +886,27 @@ async def register(request: Request, body: dict):
     protocols    = body.get("protocols") or ["http"]
     flag         = body.get("flag") or ""
 
+    # ── namespace auth (when DANS_AUTH=on) ───────────────────────────────────
+    if DANS_AUTH == "on":
+        raw_key = request.headers.get("X-API-Key", "").strip()
+        if not raw_key:
+            raise HTTPException(
+                status_code=401,
+                detail="X-API-Key header required. Sign up at POST /signup to get a key.",
+            )
+        tenant = await get_tenant_by_key(_tenant_col, raw_key)
+        if not tenant:
+            raise HTTPException(status_code=403, detail="Invalid or inactive API key")
+        if tenant["namespace"] != namespace:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Your key owns namespace '{tenant['namespace']}', "
+                    f"not '{namespace}'. "
+                    f"Use namespace='{tenant['namespace']}' when registering."
+                ),
+            )
+
     # Normalise city → lat/lon
     # Resolution order:
     #   1. Explicit lat/lon already in payload → use directly
@@ -878,6 +988,21 @@ async def deregister(
     """
     if label not in _registry:
         raise HTTPException(status_code=404, detail=f"Label '{label}' not found")
+
+    # ── namespace auth (when DANS_AUTH=on) ───────────────────────────────────
+    if DANS_AUTH == "on":
+        raw_key = request.headers.get("X-API-Key", "").strip()
+        if not raw_key:
+            raise HTTPException(401, "X-API-Key required")
+        tenant = await get_tenant_by_key(_tenant_col, raw_key)
+        if not tenant:
+            raise HTTPException(403, "Invalid API key")
+        # Verify the label being deleted belongs to this tenant's namespace
+        endpoints_for_label = _registry.get(label, [])
+        if endpoints_for_label:
+            label_ns = endpoints_for_label[0].get("namespace", DEFAULT_NS)
+            if label_ns != tenant["namespace"]:
+                raise HTTPException(403, f"Label '{label}' belongs to namespace '{label_ns}', not yours")
 
     # Query param takes precedence over body; fall back to body for backward compat
     endpoint = (endpoint or (body or {}).get("endpoint") or "").strip()
