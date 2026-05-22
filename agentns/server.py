@@ -1135,7 +1135,26 @@ async def deregister(
 
     Omit endpoint entirely to remove ALL endpoints for the label.
     """
+    # ── multi-worker split-brain guard ──────────────────────────────────────────
+    # With multiple uvicorn workers each worker has its own in-memory _registry.
+    # A registration that landed on worker A is unknown to worker B.  When a DELETE
+    # arrives on worker B we fall back to MongoDB so the caller always gets the
+    # expected result regardless of which worker handles the request.
     if label not in _registry:
+        if _mongo_col is not None:
+            try:
+                ep_param = (endpoint or (body or {}).get("endpoint") or "").strip()
+                if ep_param:
+                    result = await _mongo_col.delete_one({"label": label, "endpoint": ep_param})
+                    removed = result.deleted_count
+                else:
+                    result = await _mongo_col.delete_many({"label": label})
+                    removed = result.deleted_count
+                if removed:
+                    logger.info(f"deregister (mongo-only): label={label!r} removed={removed}")
+                    return {"status": "deregistered", "label": label, "removed": removed}
+            except Exception as exc:
+                logger.error(f"MongoDB fallback delete failed ({label}): {exc}")
         raise HTTPException(status_code=404, detail=f"Label '{label}' not found")
 
     # ── namespace auth (when DANS_AUTH=on) ───────────────────────────────────
