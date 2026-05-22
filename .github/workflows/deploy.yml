@@ -83,8 +83,11 @@ jobs:
             set -e
             cd /opt/agent-registry/src
 
-            # Upload updated server files
-            # (volume-mounted into container — no image rebuild needed)
+            # Pull the newly built image and tag it as the local live image
+            docker pull ghcr.io/dataworksai-com/agentns:latest
+            docker tag  ghcr.io/dataworksai-com/agentns:latest agentns:live
+
+            # Restart the container with the new image
             docker compose -f docker-compose.atlas.yml up -d --no-deps --force-recreate agentns
 
             # Health check
