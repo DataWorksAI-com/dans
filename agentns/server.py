@@ -68,6 +68,7 @@ from starlette.responses import Response, StreamingResponse
 
 from .auth             import security_headers_middleware
 from .cache            import ResolutionCache
+from .firewall         import FirewallEngine, FirewallRule
 from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
 from .server_selection import rank_servers, select_protocol, calculate_ttl
@@ -241,9 +242,13 @@ _health_lock = asyncio.Lock()
 _cache = ResolutionCache()
 
 # MongoDB collection handle (None if not configured)
-_mongo_col  = None
-_tenant_col = None   # tenants collection — None if DANS_AUTH=off or MongoDB unavailable
-_fed_col    = None   # federation collection — persists switchboard registries across restarts
+_mongo_col    = None
+_tenant_col   = None   # tenants collection — None if DANS_AUTH=off or MongoDB unavailable
+_fed_col      = None   # federation collection — persists switchboard registries across restarts
+_firewall_col = None   # firewall rules collection
+
+# Prompt Firewall engine (initialised in lifespan)
+_firewall: FirewallEngine = FirewallEngine()
 
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
@@ -392,6 +397,18 @@ async def lifespan(application: FastAPI):
     await _load_from_mongo()
     await _check_all()          # initial sweep so first /resolve has real data
     task = asyncio.create_task(_health_loop())
+
+    # ── Prompt Firewall ───────────────────────────────────────────────────────
+    global _firewall, _firewall_col
+    _firewall = FirewallEngine()
+    if _mongo_col is not None:
+        try:
+            _firewall_col = _mongo_col.database["firewall"]
+            await _firewall_col.create_index("rule_id", unique=True)
+            await _firewall_col.create_index("label")
+            await _firewall.load_from_mongo(_firewall_col)
+        except Exception as _fw_exc:
+            logger.warning(f"Firewall MongoDB init failed ({_fw_exc}) — rules in-memory only")
 
     total = sum(len(v) for v in _registry.values())
     logger.info(f"DANS auth mode: {DANS_AUTH}")
@@ -1526,13 +1543,40 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
         except Exception:
             pass
 
-    # ── 4. strip hop-by-hop headers ───────────────────────────────────────────
+    # ── 4. Prompt Firewall evaluation ─────────────────────────────────────────
+    _fw_decision = await _firewall.evaluate(label, body, a2a_method, request.client.host or "")
+    if _fw_decision.action == "block":
+        return JSONResponse(
+            {"error": "blocked", "reason": _fw_decision.reason},
+            status_code=403,
+            headers={"X-Firewall": "block"},
+        )
+    if _fw_decision.action == "short_circuit":
+        return JSONResponse(
+            _fw_decision.payload,
+            headers={"X-Firewall": "short-circuit"},
+        )
+    if _fw_decision.action == "cache_hit":
+        return JSONResponse(
+            _fw_decision.payload,
+            headers={"X-Firewall-Cache": "hit"},
+        )
+    if _fw_decision.action == "reroute":
+        label = _fw_decision.payload   # swap label; re-resolve below
+        target_ep  = _proxy_target(label)
+        target_url = target_ep.rstrip("/") + ("/" + path if path else "")
+        if request.query_params:
+            target_url += "?" + str(request.query_params)
+    if _fw_decision.modified_body is not None:
+        body = _fw_decision.modified_body
+
+    # ── 5. strip hop-by-hop headers ───────────────────────────────────────────
     fwd_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
 
-    # ── 5. forward and stream the response back ────────────────────────────────
+    # ── 6. forward and stream the response back ────────────────────────────────
     # Use the shared _proxy_client — no new client per request (connection reuse).
     try:
         upstream_req = _proxy_client.build_request(
@@ -1578,6 +1622,17 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
         finally:
             await upstream.aclose()   # close response only, NOT the shared client
 
+        # ── cache successful JSON responses if a cache rule applies ───────────
+        if status == 200 and content and "application/json" in content_type:
+            body_str = body.decode("utf-8", errors="replace") if body else ""
+            _cache_ttl = _firewall.get_cache_ttl_for(label, body_str, a2a_method)
+            if _cache_ttl:
+                try:
+                    import json as _json
+                    _firewall.cache_set(label, body, _json.loads(content), _cache_ttl)
+                except Exception:
+                    pass
+
         return Response(
             content     = content,
             status_code = status,
@@ -1593,6 +1648,98 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
+
+
+# ── Firewall routes ────────────────────────────────────────────────────────────
+
+@app.post("/firewall/rules", status_code=201)
+async def firewall_add_rule(body: dict):
+    """
+    Create a firewall rule.
+
+    Required:
+        label       — agent label to protect, or "*" for all agents
+        action      — "block" | "allow" | "reroute" | "cache" | "rate_limit" | "short_circuit"
+        match_type  — "contains" | "regex" | "method" | "always"
+        match_value — string / regex / A2A method name to match
+
+    Optional:
+        params      — action-specific: {"to":"other-label"} | {"ttl":300} | {"response":{...}} | {"max_per_minute":60}
+        priority    — lower = evaluated first (default 100)
+    """
+    label       = (body.get("label") or "").strip()
+    action      = (body.get("action") or "").strip()
+    match_type  = (body.get("match_type") or "").strip()
+    match_value = (body.get("match_value") or "").strip()
+
+    if not label:
+        raise HTTPException(400, "'label' is required (use '*' for all agents)")
+    if action not in {"block", "allow", "reroute", "cache", "rate_limit", "short_circuit"}:
+        raise HTTPException(400, f"Invalid action {action!r}. Must be one of: block, allow, reroute, cache, rate_limit, short_circuit")
+    if match_type not in {"contains", "regex", "method", "always"}:
+        raise HTTPException(400, f"Invalid match_type {match_type!r}. Must be one of: contains, regex, method, always")
+
+    rule = FirewallRule(
+        label       = label,
+        action      = action,
+        match_type  = match_type,
+        match_value = match_value,
+        params      = body.get("params") or {},
+        priority    = int(body.get("priority", 100)),
+    )
+    await _firewall.add_rule(rule)
+    return {"status": "created", "rule": rule.to_dict()}
+
+
+@app.get("/firewall/rules")
+async def firewall_list_rules(label: Optional[str] = None):
+    """List all firewall rules, optionally filtered by label."""
+    rules = _firewall.list_rules(label)
+    return {"rules": [r.to_dict() for r in rules], "total": len(rules)}
+
+
+@app.delete("/firewall/rules/{rule_id}")
+async def firewall_remove_rule(rule_id: str):
+    """Remove a firewall rule by rule_id."""
+    removed = await _firewall.remove_rule(rule_id)
+    if not removed:
+        raise HTTPException(404, f"Rule '{rule_id}' not found")
+    return {"status": "removed", "rule_id": rule_id}
+
+
+@app.get("/firewall/stats")
+async def firewall_stats():
+    """Return hit/block/pass/cache counts per agent label."""
+    return {"stats": _firewall.get_stats()}
+
+
+@app.post("/firewall/test")
+async def firewall_test(body: dict):
+    """
+    Dry-run: evaluate a request body against firewall rules without forwarding.
+
+    Required:
+        label  — agent label to test against
+        body   — the request body (dict) to evaluate
+
+    Returns the decision that would be made (action, reason, would_forward).
+    """
+    label      = (body.get("label") or "").strip()
+    test_body  = body.get("body") or {}
+    if not label:
+        raise HTTPException(400, "'label' is required")
+
+    import json as _json
+    body_bytes = _json.dumps(test_body).encode()
+    method     = test_body.get("method", "")
+
+    decision = await _firewall.evaluate(label, body_bytes, method, "dry-run")
+    return {
+        "action":        decision.action,
+        "reason":        decision.reason,
+        "would_forward": decision.action == "pass",
+        "payload":       decision.payload,
+    }
 
 
 # ── entry point ────────────────────────────────────────────────────────────────

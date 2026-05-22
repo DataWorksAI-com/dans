@@ -54,6 +54,9 @@ __version__ = "3.0.0"
 __author__  = "DataWorksAI"  # Original authors — see LICENSE
 __license__ = "MIT"
 
+# ── Firewall ───────────────────────────────────────────────────────────────────
+from agentns.firewall import FirewallRule
+
 # ── Requester side ─────────────────────────────────────────────────────────────
 from agentns.requester_lib import (
     connect as resolve_connect,
@@ -75,6 +78,8 @@ from agentns.target_lib import (
 from agentns import requester_lib, target_lib
 
 __all__ = [
+    # Firewall
+    "FirewallRule",
     # Requester side
     "resolve_connect",
     "AgentName",
