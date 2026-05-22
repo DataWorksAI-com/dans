@@ -625,7 +625,10 @@ def _build_proxy_response(result: Dict, label: str, namespace: str) -> Dict:
         return result
 
     direct_endpoint = result.get("endpoint", "")
-    proxy_url       = f"{proxy_base}/a2a/{namespace}/{label}"
+    if _PROXY_MODE == "dans":
+        proxy_url = f"{proxy_base}/proxy/{label}"
+    else:
+        proxy_url = f"{proxy_base}/a2a/{namespace}/{label}"
     slim_id         = f"{SLIM_ORG}/{namespace}/{label}" if SLIM_ORG else f"{namespace}/{label}"
 
     result["url"]           = proxy_url
