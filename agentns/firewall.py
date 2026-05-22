@@ -4,7 +4,7 @@ agentns.firewall
 Prompt Firewall — A2A Delegate middleware for DANS.
 
 Intercepts every call through /proxy/{label} and applies configurable rules
-before forwarding to the target agent.  Think of it as Akamai for AI agent
+before forwarding to the target agent.  
 traffic: health-routing and geo-routing were already in DANS; this adds
 security, caching, rate-limiting, and rerouting — all via a simple REST API
 with no extra infrastructure required.
