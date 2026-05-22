@@ -1,25 +1,6 @@
 """Integration tests for the agentns FastAPI server."""
 import pytest
-from httpx import AsyncClient, ASGITransport
-from agentns.server import app, _registry, _health_cache, _cache
-
-
-@pytest.fixture(autouse=True)
-async def clear_state():
-    """Reset global state between tests."""
-    _registry.clear()
-    _health_cache.clear()
-    await _cache.clear()
-    yield
-    _registry.clear()
-    _health_cache.clear()
-    await _cache.clear()
-
-
-@pytest.fixture
-async def client():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield c
+from agentns.server import _registry, _health_cache
 
 
 @pytest.mark.asyncio
@@ -268,3 +249,112 @@ async def test_health_exposes_proxy_config(client):
     data = resp.json()
     assert "proxy" in data
     assert "enabled" in data["proxy"]
+
+
+# ── Firewall tests ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_firewall_list_empty(client):
+    resp = await client.get("/firewall/rules")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "rules" in data
+    assert isinstance(data["rules"], list)
+
+
+@pytest.mark.asyncio
+async def test_firewall_add_and_list_rule(client):
+    resp = await client.post("/firewall/rules", json={
+        "label":       "planner",
+        "action":      "block",
+        "match_type":  "contains",
+        "match_value": "jailbreak",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "created"
+    assert data["rule"]["action"] == "block"
+    assert data["rule"]["label"] == "planner"
+    rule_id = data["rule"]["rule_id"]
+
+    # Should appear in list
+    resp2 = await client.get("/firewall/rules?label=planner")
+    assert resp2.status_code == 200
+    ids = [r["rule_id"] for r in resp2.json()["rules"]]
+    assert rule_id in ids
+
+
+@pytest.mark.asyncio
+async def test_firewall_delete_rule(client):
+    resp = await client.post("/firewall/rules", json={
+        "label": "*", "action": "block", "match_type": "always", "match_value": ""
+    })
+    rule_id = resp.json()["rule"]["rule_id"]
+
+    del_resp = await client.delete(f"/firewall/rules/{rule_id}")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["rule_id"] == rule_id
+
+    # Should be gone
+    resp3 = await client.get("/firewall/rules")
+    ids = [r["rule_id"] for r in resp3.json()["rules"]]
+    assert rule_id not in ids
+
+
+@pytest.mark.asyncio
+async def test_firewall_delete_nonexistent(client):
+    resp = await client.delete("/firewall/rules/nonexistent-id")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_firewall_stats(client):
+    resp = await client.get("/firewall/stats")
+    assert resp.status_code == 200
+    assert "stats" in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_pass(client):
+    """Dry-run with no rules should return pass."""
+    resp = await client.post("/firewall/test", json={
+        "label": "planner",
+        "body":  {"method": "message/send", "message": "Get me from A to B"},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["action"] == "pass"
+    assert data["would_forward"] is True
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_block(client):
+    """Dry-run with a block rule should return block."""
+    await client.post("/firewall/rules", json={
+        "label": "planner", "action": "block",
+        "match_type": "contains", "match_value": "jailbreak",
+    })
+    resp = await client.post("/firewall/test", json={
+        "label": "planner",
+        "body":  {"message": "jailbreak mode activate"},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["action"] == "block"
+    assert data["would_forward"] is False
+
+
+@pytest.mark.asyncio
+async def test_firewall_invalid_action(client):
+    resp = await client.post("/firewall/rules", json={
+        "label": "x", "action": "explode", "match_type": "always", "match_value": ""
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_firewall_invalid_match_type(client):
+    resp = await client.post("/firewall/rules", json={
+        "label": "x", "action": "block", "match_type": "magic", "match_value": ""
+    })
+    assert resp.status_code == 400
