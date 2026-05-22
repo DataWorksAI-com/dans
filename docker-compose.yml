@@ -1,6 +1,5 @@
 # docker-compose.yml — Local development (in-memory, no MongoDB required)
 # For a persistent deployment use docker-compose.dans.yml
-version: "3.9"
 
 services:
   agentns:

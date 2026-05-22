@@ -60,7 +60,7 @@ Response:
   "status": "registered",
   "label": "my-weather-agent",
   "endpoint": "http://your-server:9001",
-  "agent_name": "urn:agents.dataworksai.com:public:my-weather-agent"
+  "agent_name": "urn:agentns.local:public:my-weather-agent"
 }
 ```
 
@@ -75,7 +75,7 @@ curl -X POST http://97.107.132.213/dans/resolve \
 # By full URN
 curl -X POST http://97.107.132.213/dans/resolve \
   -H "Content-Type: application/json" \
-  -d '{"agent_name": "urn:agents.dataworksai.com:public:my-weather-agent"}'
+  -d '{"agent_name": "urn:agentns.local:public:my-weather-agent"}'
 ```
 
 Response:
@@ -220,13 +220,13 @@ Then access it at `http://localhost:8200/`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENTNS_TLD` | `agents.dataworksai.com` | URN TLD this instance issues |
+| `AGENTNS_TLD` | `agentns.local` | URN TLD this instance issues |
 | `AGENTNS_NAMESPACE` | `public` | Default URN namespace |
-| `MONGODB_URI` | *(empty)* | MongoDB connection string |
+| `MONGODB_URI` | *(empty)* | MongoDB connection string (in-memory if absent) |
 | `MONGODB_DB` | `ans_public` | MongoDB database name |
-| `ANS_FALLBACK_URL` | *(empty)* | Registry URL to try as fallback |
-| `FEDERATION_REGISTRIES` | *(empty)* | Comma-separated remote DANS instances |
-| `AGENTNS_AUTH` | `off` | `"key"` to require X-API-Key |
+| `ANS_FALLBACK_URL` | *(empty)* | Capability registry URL to fall back to when label not found locally |
+| `FEDERATION_REGISTRIES` | *(empty)* | Comma-separated remote DANS instances for federation |
+| `DANS_AUTH` | `off` | `"on"` to require X-API-Key on writes |
 
 ---
 

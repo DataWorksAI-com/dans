@@ -110,7 +110,7 @@ MONGODB_DB       = os.getenv("MONGODB_DB",                  "agentns")
 
 # ── Optional registry fallback ─────────────────────────────────────────────────
 # When ANS_FALLBACK_URL is set, /resolve tries this registry URL before returning 404.
-# Useful for bridging to an existing capability-based registry (e.g. DataWorksAI registry).
+# Useful for bridging to an existing capability-based registry (e.g. a capability/search registry).
 # Leave unset for a fully standalone ANS instance.
 #   ANS_FALLBACK_URL=http://my-registry:6900
 ANS_FALLBACK_URL = os.getenv("ANS_FALLBACK_URL", "").rstrip("/")
@@ -576,7 +576,7 @@ curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</p
 </table>
 
 <p style="margin-top:32px;color:#888;font-size:.85rem">
-  Powered by <a href="https://github.com/DataWorksAI-com/dans">DataWorksAI DANS</a> &nbsp;&middot;&nbsp;
+  Powered by <a href="https://github.com/dataworksai-com/agent-registry">DANS — Dynamic Agent Naming Service</a> &nbsp;&middot;&nbsp;
   <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a>
 </p>
 </body></html>"""
@@ -655,7 +655,7 @@ async def _federated_resolve(remote_url: str, body: Dict) -> Dict:
 
 async def _registry_fallback(label: str, requester_context: dict) -> Optional[Dict]:
     """
-    Try ANS_FALLBACK_URL (e.g. a DataWorksAI registry) when the label isn't in
+    Try ANS_FALLBACK_URL (e.g. a capability-based registry) when the label isn't in
     the local store.  Returns a resolve-shaped dict on success, None otherwise.
     Only active when ANS_FALLBACK_URL is set.
     """
@@ -855,6 +855,20 @@ async def resolve(request: Request, body: dict):
 
     # ── lookup ────────────────────────────────────────────────────────────────
     endpoints = _registry.get(label)
+    if not endpoints and _mongo_col is not None:
+        # Multi-worker: another uvicorn worker may have registered this label.
+        # Reload just this label from MongoDB before falling back.
+        try:
+            existing_urls = [e["endpoint"] for e in _registry.get(label, [])]
+            async for doc in _mongo_col.find({"label": label}):
+                ep = {k: v for k, v in doc.items() if k not in ("_id", "label")}
+                if ep.get("endpoint") and ep["endpoint"] not in existing_urls:
+                    _registry.setdefault(label, []).append(ep)
+                    existing_urls.append(ep["endpoint"])
+            endpoints = _registry.get(label)
+        except Exception as _exc:
+            logger.debug(f"MongoDB reload for '{label}' failed: {_exc}")
+
     if not endpoints:
         # 1. Fan out to all connected switchboard registries in parallel
         sb = await _switchboard_fan_out(label, requester_context)

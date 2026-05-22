@@ -28,15 +28,14 @@ services:
       - "8200:8200"
     environment:
       # DANS identity — what URNs this instance issues
-      - AGENTNS_TLD=${AGENTNS_TLD:-agents.dataworksai.com}
+      - AGENTNS_TLD=${AGENTNS_TLD:-agentns.local}
       - AGENTNS_NAMESPACE=${AGENTNS_NAMESPACE:-public}
 
       # Persistence — omit MONGODB_URI for in-memory only (resets on restart)
       - MONGODB_URI=${MONGODB_URI:-}
       - MONGODB_DB=${MONGODB_DB:-ans_public}
 
-      # Auth — off for a public open service; set to "key" to require X-API-Key
-      - AGENTNS_AUTH=${AGENTNS_AUTH:-off}
+      # Auth — "off" for open service (default); "on" to require X-API-Key on writes
       - DANS_AUTH=${DANS_AUTH:-off}
 
       # Performance

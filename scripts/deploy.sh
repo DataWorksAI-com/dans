@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-SERVER="${DEPLOY_HOST:-97.107.132.213}"
+SERVER="${DEPLOY_HOST:?Set DEPLOY_HOST to your server IP or hostname}"
 DEPLOY_USER="${DEPLOY_USER:-root}"
 SSH_KEY="${SSH_KEY:-}"
 DEPLOY_DIR="/opt/agent-registry/src"
@@ -38,11 +38,11 @@ cd ${DEPLOY_DIR}
 # Write .env if not present
 if [ ! -f .env ]; then
 cat > .env <<ENV
-AGENTNS_TLD=agents.dataworksai.com
-AGENTNS_NAMESPACE=public
+AGENTNS_TLD=${AGENTNS_TLD:-agentns.local}
+AGENTNS_NAMESPACE=${AGENTNS_NAMESPACE:-public}
 MONGODB_URI=${MONGODB_URI:-}
-MONGODB_DB=ans_public
-DANS_AUTH=off
+MONGODB_DB=${MONGODB_DB:-ans_public}
+DANS_AUTH=${DANS_AUTH:-off}
 ENV
 echo "📝 Created .env"
 fi

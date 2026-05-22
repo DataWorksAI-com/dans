@@ -33,8 +33,8 @@ Start the server
     from agentns.server import app
     uvicorn.run(app, host="0.0.0.0", port=8200)
 
-    # Public instance (no setup needed):
-    AGENTNS_URL=http://97.107.132.213/dans
+    # Public instance (no setup needed — use your own or the hosted one):
+    AGENTNS_URL=http://your-dans-host/dans
 
 Environment variables
 ---------------------
@@ -51,7 +51,7 @@ Environment variables
 """
 
 __version__ = "3.0.0"
-__author__  = "DataWorksAI"
+__author__  = "DataWorksAI"  # Original authors — see LICENSE
 __license__ = "MIT"
 
 # ── Requester side ─────────────────────────────────────────────────────────────
