@@ -64,7 +64,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth             import security_headers_middleware
 from .cache            import ResolutionCache
