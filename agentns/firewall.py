@@ -4,13 +4,11 @@ agentns.firewall
 Prompt Firewall — A2A Delegate middleware for DANS.
 
 Intercepts every call through /proxy/{label} and applies configurable rules
-before forwarding to the target agent.  
-traffic: health-routing and geo-routing were already in DANS; this adds
-security, caching, rate-limiting, and rerouting — all via a simple REST API
-with no extra infrastructure required.
+before forwarding to the target agent, AND filters the agent's response before
+returning it to the caller.
 
-Rule actions
-------------
+Rule actions — REQUEST (evaluated before forwarding)
+-----------------------------------------------------
     block          — deny the request (returns 403 to caller)
     allow          — explicit allowlist; anything not matched is blocked
     reroute        — forward to a different agent label
@@ -18,21 +16,34 @@ Rule actions
     rate_limit     — max N calls per minute from the same IP
     short_circuit  — return a static response without forwarding at all
 
+Rule actions — RESPONSE (evaluated on the agent's reply before returning it)
+-----------------------------------------------------------------------------
+    block_response — replace the agent's response with a safe error message
+                     (use for: prompt leakage, toxic content, policy violations)
+    redact         — replace regex matches in the response with [REDACTED]
+                     (use for: PII, API keys, internal hostnames)
+
 Match types
 -----------
-    contains   — match_value appears anywhere in the request body (case-insensitive)
+    contains   — match_value appears anywhere in the body (case-insensitive)
     regex      — re.search(match_value, body_str, re.IGNORECASE)
     method     — A2A method field equals match_value (e.g. "message/send")
-    always     — matches every request (useful for global cache/rate-limit rules)
+    always     — matches every request/response
 
-Evaluation order (first match wins)
-------------------------------------
+Request evaluation order (first match wins)
+-------------------------------------------
     1. rate_limit  — fail fast before any inspection
     2. block       — deny matching prompts
     3. allow       — if any allow rules exist for this label, deny non-matching
     4. cache       — check response cache
     5. reroute     — swap destination label
     6. short_circuit — return static payload
+    (no match)  →  pass
+
+Response evaluation order
+--------------------------
+    1. block_response — drop the response entirely, return safe message
+    2. redact         — scrub matching text before returning
     (no match)  →  pass
 
 Label "*" applies a rule to ALL agents (evaluated before label-specific rules).
@@ -54,9 +65,12 @@ logger = logging.getLogger("agentns.firewall")
 
 # ── Data structures ────────────────────────────────────────────────────────────
 
-VALID_ACTIONS     = {"block", "allow", "reroute", "cache", "rate_limit", "short_circuit"}
+REQUEST_ACTIONS   = {"block", "allow", "reroute", "cache", "rate_limit", "short_circuit"}
+RESPONSE_ACTIONS  = {"block_response", "redact"}
+VALID_ACTIONS     = REQUEST_ACTIONS | RESPONSE_ACTIONS
 VALID_MATCH_TYPES = {"contains", "regex", "method", "always"}
 ACTION_ORDER      = ["rate_limit", "block", "allow", "cache", "reroute", "short_circuit"]
+RESPONSE_ORDER    = ["block_response", "redact"]
 
 
 @dataclass
@@ -103,10 +117,10 @@ class FirewallRule:
 
 @dataclass
 class FirewallDecision:
-    action:        str                  # "pass" | "block" | "reroute" | "cache_hit" | "short_circuit"
+    action:        str                  # "pass"|"block"|"reroute"|"cache_hit"|"short_circuit"|"response_blocked"|"redacted"
     reason:        str   = ""           # rule_id that triggered, or descriptive string
     payload:       Any   = None         # reroute→new label; cache_hit/short_circuit→response dict
-    modified_body: Optional[bytes] = None  # mutated body (future: PII strip)
+    modified_body: Optional[bytes] = None  # redact→scrubbed body bytes
 
 
 _PASS = FirewallDecision(action="pass")
@@ -135,7 +149,9 @@ class FirewallEngine:
         self._rate_windows: Dict[tuple, _RateWindow] = {}
         # Stats counters: label → action → count
         self._stats: Dict[str, Dict[str, int]] = defaultdict(
-            lambda: {"pass": 0, "block": 0, "reroute": 0, "cache_hit": 0, "short_circuit": 0, "rate_limited": 0}
+            lambda: {"pass": 0, "block": 0, "reroute": 0, "cache_hit": 0,
+                     "short_circuit": 0, "rate_limited": 0,
+                     "response_blocked": 0, "redacted": 0}
         )
         self._mongo_col = None
 
@@ -274,6 +290,78 @@ class FirewallEngine:
                     return FirewallDecision(action="short_circuit", reason=f"rule:{rule.rule_id}", payload=static_response)
 
         self._record(label, "pass")
+        return _PASS
+
+    # ── Response evaluation ────────────────────────────────────────────────────
+
+    async def evaluate_response(
+        self,
+        label:      str,
+        body_bytes: bytes,
+        a2a_method: str = "",
+    ) -> FirewallDecision:
+        """
+        Evaluate the agent's response body against block_response and redact rules.
+
+        block_response  → return FirewallDecision(action="response_blocked")
+        redact          → return FirewallDecision(action="redacted", modified_body=scrubbed)
+        (no match)      → return _PASS
+
+        Evaluation order: block_response first, then redact.
+        Multiple redact rules are applied cumulatively.
+        """
+        rules: List[FirewallRule] = []
+        for bucket in ("*", label):
+            rules.extend(self._rules.get(bucket, []))
+
+        response_rules = [r for r in rules if r.action in RESPONSE_ACTIONS]
+        if not response_rules:
+            return _PASS
+
+        response_rules.sort(key=lambda r: (r.priority, r.action))
+        body_str = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+
+        # 1. block_response — full block takes priority
+        for rule in response_rules:
+            if rule.action != "block_response":
+                continue
+            if self._matches(rule, body_str, a2a_method):
+                self._record(label, "response_blocked")
+                logger.warning(
+                    f"firewall: response blocked — label={label!r} rule={rule.rule_id} "
+                    f"match={rule.match_type}:{rule.match_value!r}"
+                )
+                return FirewallDecision(action="response_blocked", reason=f"rule:{rule.rule_id}")
+
+        # 2. redact — apply all matching redact rules cumulatively
+        redacted_str = body_str
+        triggered_rules = []
+        for rule in response_rules:
+            if rule.action != "redact":
+                continue
+            if not self._matches(rule, redacted_str, a2a_method):
+                continue
+            replacement = rule.params.get("replacement", "[REDACTED]")
+            if rule.match_type == "contains":
+                redacted_str = re.sub(
+                    re.escape(rule.match_value), replacement, redacted_str, flags=re.IGNORECASE
+                )
+            elif rule.match_type == "regex":
+                try:
+                    redacted_str = re.sub(rule.match_value, replacement, redacted_str, flags=re.IGNORECASE)
+                except re.error:
+                    pass
+            triggered_rules.append(rule.rule_id)
+
+        if triggered_rules:
+            self._record(label, "redacted")
+            logger.info(f"firewall: response redacted — label={label!r} rules={triggered_rules}")
+            return FirewallDecision(
+                action="redacted",
+                reason=f"rules:{','.join(triggered_rules)}",
+                modified_body=redacted_str.encode("utf-8"),
+            )
+
         return _PASS
 
     # ── Match helper ───────────────────────────────────────────────────────────

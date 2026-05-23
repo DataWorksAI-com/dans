@@ -68,7 +68,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth             import security_headers_middleware
 from .cache            import ResolutionCache
-from .firewall         import FirewallEngine, FirewallRule
+from .firewall         import FirewallEngine, FirewallRule, VALID_ACTIONS
 from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
 from .server_selection import rank_servers, select_protocol, calculate_ttl
@@ -1625,6 +1625,23 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
         finally:
             await upstream.aclose()   # close response only, NOT the shared client
 
+        # ── 9. Response Firewall — evaluate agent reply before returning it ───
+        if content:
+            _fw_resp = await _firewall.evaluate_response(label, content, a2a_method)
+            if _fw_resp.action == "response_blocked":
+                return JSONResponse(
+                    {
+                        "error":   "response_filtered",
+                        "reason":  _fw_resp.reason,
+                        "message": "Agent response blocked by security policy.",
+                    },
+                    status_code=200,
+                    headers={"X-Firewall-Response": "blocked"},
+                )
+            if _fw_resp.action == "redacted" and _fw_resp.modified_body is not None:
+                content = _fw_resp.modified_body
+                resp_headers["X-Firewall-Response"] = "redacted"
+
         # ── cache successful JSON responses if a cache rule applies ───────────
         if status == 200 and content and "application/json" in content_type:
             body_str = body.decode("utf-8", errors="replace") if body else ""
@@ -1663,6 +1680,7 @@ async def firewall_add_rule(body: dict):
     Required:
         label       — agent label to protect, or "*" for all agents
         action      — "block" | "allow" | "reroute" | "cache" | "rate_limit" | "short_circuit"
+                      "block_response" | "redact"
         match_type  — "contains" | "regex" | "method" | "always"
         match_value — string / regex / A2A method name to match
 
@@ -1677,8 +1695,8 @@ async def firewall_add_rule(body: dict):
 
     if not label:
         raise HTTPException(400, "'label' is required (use '*' for all agents)")
-    if action not in {"block", "allow", "reroute", "cache", "rate_limit", "short_circuit"}:
-        raise HTTPException(400, f"Invalid action {action!r}. Must be one of: block, allow, reroute, cache, rate_limit, short_circuit")
+    if action not in VALID_ACTIONS:
+        raise HTTPException(400, f"Invalid action {action!r}. Must be one of: {', '.join(sorted(VALID_ACTIONS))}")
     if match_type not in {"contains", "regex", "method", "always"}:
         raise HTTPException(400, f"Invalid match_type {match_type!r}. Must be one of: contains, regex, method, always")
 
@@ -1719,30 +1737,76 @@ async def firewall_stats():
 @app.post("/firewall/test")
 async def firewall_test(body: dict):
     """
-    Dry-run: evaluate a request body against firewall rules without forwarding.
+    Dry-run: evaluate request and/or response bodies against firewall rules
+    without any forwarding.
 
-    Required:
-        label  — agent label to test against
-        body   — the request body (dict) to evaluate
+    Fields:
+        label         — agent label to test against (required)
+        body          — request body dict to evaluate against REQUEST rules
+        response_body — response body dict/str to evaluate against RESPONSE rules
+                        (optional; omit to skip response rule testing)
 
-    Returns the decision that would be made (action, reason, would_forward).
+    Returns:
+        request        — decision for the request body (if provided)
+        response       — decision for the response body (if provided)
+        would_forward  — true only when the request decision is "pass"
     """
-    label      = (body.get("label") or "").strip()
-    test_body  = body.get("body") or {}
+    import json as _json
+
+    label = (body.get("label") or "").strip()
     if not label:
         raise HTTPException(400, "'label' is required")
 
-    import json as _json
-    body_bytes = _json.dumps(test_body).encode()
-    method     = test_body.get("method", "")
+    result: dict = {}
 
-    decision = await _firewall.evaluate(label, body_bytes, method, "dry-run")
-    return {
-        "action":        decision.action,
-        "reason":        decision.reason,
-        "would_forward": decision.action == "pass",
-        "payload":       decision.payload,
-    }
+    # ── Request evaluation ────────────────────────────────────────────────
+    test_body  = body.get("body")
+    if test_body is not None:
+        if isinstance(test_body, str):
+            req_bytes = test_body.encode()
+            method    = ""
+        else:
+            req_bytes = _json.dumps(test_body).encode()
+            method    = test_body.get("method", "") if isinstance(test_body, dict) else ""
+        req_decision = await _firewall.evaluate(label, req_bytes, method, "dry-run")
+        result["request"] = {
+            "action":        req_decision.action,
+            "reason":        req_decision.reason,
+            "would_forward": req_decision.action == "pass",
+            "payload":       req_decision.payload,
+        }
+        # Top-level compat shim (old callers that only passed "body")
+        result["action"]        = req_decision.action
+        result["reason"]        = req_decision.reason
+        result["would_forward"] = req_decision.action == "pass"
+        result["payload"]       = req_decision.payload
+
+    # ── Response evaluation ───────────────────────────────────────────────
+    resp_body = body.get("response_body")
+    if resp_body is not None:
+        if isinstance(resp_body, str):
+            resp_bytes = resp_body.encode()
+            resp_method = ""
+        else:
+            resp_bytes  = _json.dumps(resp_body).encode()
+            resp_method = resp_body.get("method", "") if isinstance(resp_body, dict) else ""
+        resp_decision = await _firewall.evaluate_response(label, resp_bytes, resp_method)
+        redacted_text = None
+        if resp_decision.action == "redacted" and resp_decision.modified_body:
+            try:
+                redacted_text = resp_decision.modified_body.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        result["response"] = {
+            "action":       resp_decision.action,
+            "reason":       resp_decision.reason,
+            "redacted_body": redacted_text,
+        }
+
+    if not result:
+        raise HTTPException(400, "provide at least one of 'body' or 'response_body'")
+
+    return result
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
