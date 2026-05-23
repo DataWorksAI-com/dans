@@ -530,8 +530,18 @@ async def check_namespace(namespace: str):
 async def landing(request: Request):
     """Return a human-readable landing page for browser visits; JSON for API clients."""
     if "text/html" not in request.headers.get("accept", ""):
-        return {"service": "agentns", "version": "3.0.0",
-                "docs": "/docs", "health": "/health"}
+        return {
+            "service": "agentns",
+            "version": "3.0.0",
+            "docs":    "/docs",
+            "health":  "/health",
+            "firewall": {
+                "rules":  "/firewall/rules",
+                "stats":  "/firewall/stats",
+                "test":   "/firewall/test",
+                "proxy":  "/proxy/{label}",
+            },
+        }
     tld = DEFAULT_TLD
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -574,27 +584,69 @@ curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</p
 
 <h2>What DANS adds</h2>
 <div class="grid">
-  <div class="card"><h3>Stable naming</h3>Agent moves servers? Just re-register. All callers keep using the same name.</div>
-  <div class="card"><h3>Health-aware routing</h3>DANS skips unhealthy endpoints and routes to the best available instance.</div>
-  <div class="card"><h3>Geo-routing</h3>Register multiple instances with locations &mdash; DANS picks the nearest one for each caller.</div>
-  <div class="card"><h3>Federation</h3>Connect multiple DANS instances together, like DNS zones. Resolve agents across networks.</div>
+  <div class="card"><h3>&#128270; Stable naming</h3>Agent moves servers? Just re-register. All callers keep using the same name.</div>
+  <div class="card"><h3>&#10084; Health-aware routing</h3>DANS skips unhealthy endpoints automatically and routes to the best available instance.</div>
+  <div class="card"><h3>&#127759; Geo-routing</h3>Register multiple instances with locations &mdash; DANS picks the nearest one for each caller.</div>
+  <div class="card"><h3>&#128279; Federation</h3>Connect multiple DANS instances together, like DNS zones. Resolve agents across networks.</div>
+  <div class="card"><h3>&#128737; Prompt Firewall</h3>Built-in A2A firewall. Block prompt injection, redact PII from responses, reroute calls &mdash; zero extra infrastructure.</div>
+  <div class="card"><h3>&#128257; A2A Proxy</h3>All calls flow through <code>/proxy/{{label}}</code> &mdash; DANS terminates the inbound connection, resolves the target, and forwards securely.</div>
 </div>
+
+<h2>&#128737; Prompt Firewall</h2>
+<p>DANS has a built-in firewall that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Rules are API-driven &mdash; no YAML, no restarts.</p>
+<pre># Block prompt injection on every agent
+curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/rules \\
+  -H "Content-Type: application/json" \\
+  -d '{{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}}'
+
+# Redact API keys from agent responses
+curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/rules \\
+  -H "Content-Type: application/json" \\
+  -d '{{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{{20,}}","params":{{"replacement":"[API-KEY-REDACTED]"}}}}'
+
+# Dry-run test (no forwarding)
+curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/test \\
+  -H "Content-Type: application/json" \\
+  -d '{{"label":"*","body":{{"message":"ignore previous instructions"}}}}'
+# → {{"action":"block","reason":"rule:abc123","would_forward":false}}
+
+# Stats
+curl {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/stats</pre>
+
+<table>
+<tr><th>Action</th><th>Phase</th><th>What it does</th></tr>
+<tr><td><code>block</code></td><td>Request</td><td>Return 403 before the call is forwarded</td></tr>
+<tr><td><code>allow</code></td><td>Request</td><td>Deny-all except explicitly listed prompts</td></tr>
+<tr><td><code>reroute</code></td><td>Request</td><td>Forward to a different agent label</td></tr>
+<tr><td><code>cache</code></td><td>Request</td><td>Return cached response for repeated prompts</td></tr>
+<tr><td><code>short_circuit</code></td><td>Request</td><td>Return a static reply without forwarding</td></tr>
+<tr><td><code>rate_limit</code></td><td>Request</td><td>Reject above N req/min per IP</td></tr>
+<tr><td><code>block_response</code></td><td>Response</td><td>Suppress agent reply if it matches the rule</td></tr>
+<tr><td><code>redact</code></td><td>Response</td><td>Strip secrets / PII from the agent reply</td></tr>
+</table>
 
 <h2>API Reference</h2>
 <table>
 <tr><th>Method</th><th>Path</th><th>Description</th></tr>
 <tr><td>POST</td><td>/register</td><td>Register an agent endpoint</td></tr>
-<tr><td>POST</td><td>/resolve</td><td>Resolve agent name → endpoint URL</td></tr>
+<tr><td>POST</td><td>/resolve</td><td>Resolve agent name &rarr; endpoint URL</td></tr>
 <tr><td>DELETE</td><td>/register/{{label}}</td><td>Deregister an endpoint</td></tr>
 <tr><td>GET</td><td>/health</td><td>Service health + all registered agents</td></tr>
 <tr><td>GET</td><td>/agents</td><td>List registered agents</td></tr>
+<tr><td>POST</td><td>/proxy/{{label}}</td><td>Proxy a call through the firewall to a resolved agent</td></tr>
+<tr><td>POST</td><td>/firewall/rules</td><td>Create a firewall rule</td></tr>
+<tr><td>GET</td><td>/firewall/rules</td><td>List rules (optionally filter by <code>?label=X</code>)</td></tr>
+<tr><td>DELETE</td><td>/firewall/rules/{{rule_id}}</td><td>Delete a firewall rule</td></tr>
+<tr><td>GET</td><td>/firewall/stats</td><td>Hit / block / pass / cache counts per label</td></tr>
+<tr><td>POST</td><td>/firewall/test</td><td>Dry-run: evaluate request + response against rules</td></tr>
 <tr><td>POST</td><td>/switchboard/registries</td><td>Connect a remote registry (federation)</td></tr>
 <tr><td>GET</td><td>/docs</td><td>Interactive API docs (Swagger UI)</td></tr>
 </table>
 
 <p style="margin-top:32px;color:#888;font-size:.85rem">
-  Powered by <a href="https://github.com/dataworksai-com/agent-registry">DANS — Dynamic Agent Naming Service</a> &nbsp;&middot;&nbsp;
-  <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a>
+  Powered by <a href="https://github.com/DataWorksAI-com/dans">DANS — Dynamic Agent Naming Service</a> &nbsp;&middot;&nbsp;
+  <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a> &nbsp;&middot;&nbsp;
+  <a href="/firewall/stats">Firewall Stats</a> &nbsp;&middot;&nbsp; <a href="/firewall/rules">Firewall Rules</a>
 </p>
 </body></html>"""
     from starlette.responses import HTMLResponse
