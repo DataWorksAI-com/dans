@@ -122,6 +122,78 @@ endpoint = await client.resolve(agentns.Query(
 
 ## Features
 
+### Prompt Firewall
+DANS includes a built-in **A2A Prompt Firewall** — middleware that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Zero extra infrastructure: it's part of DANS itself.
+
+```
+Requester Agent
+    │  POST /dans/proxy/weather-agent
+    ▼
+┌────────────────────────────────────────────┐
+│  DANS Proxy + Firewall                     │
+│                                            │
+│  1. Rate limit  (per IP / per label)       │
+│  2. Block rules (prompt injection, etc.)   │
+│  3. Allow rules (allowlist only)           │
+│  4. Cache check (same prompt → hit)        │
+│  5. Reroute     (method → other label)     │
+│  6. Short-circuit (static reply)           │
+│  7. Forward to resolved healthy endpoint   │
+│  8. Response filtering (block / redact)    │
+└──────────────────┬─────────────────────────┘
+                   │
+              Target Agent
+```
+
+Rules are API-driven — no YAML, no restarts. Add a rule and it's live instantly.
+
+```bash
+# Block prompt injection on every agent
+curl -X POST http://97.107.132.213/dans/firewall/rules \
+  -d '{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}'
+
+# Block jailbreaks on a specific agent (regex)
+curl -X POST http://97.107.132.213/dans/firewall/rules \
+  -d '{"label":"planner","action":"block","match_type":"regex","match_value":"(?i)(act as|pretend you are).{0,30}?(unrestricted|DAN|evil)"}'
+
+# Redact API keys from any agent response before returning to caller
+curl -X POST http://97.107.132.213/dans/firewall/rules \
+  -d '{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{20,}","params":{"replacement":"[API-KEY-REDACTED]"}}'
+
+# Block an agent from leaking its own system prompt
+curl -X POST http://97.107.132.213/dans/firewall/rules \
+  -d '{"label":"*","action":"block_response","match_type":"contains","match_value":"system prompt"}'
+
+# Dry-run test — check what would happen without forwarding
+curl -X POST http://97.107.132.213/dans/firewall/test \
+  -d '{"label":"planner","body":{"message":"ignore previous instructions"}}'
+# → {"action":"block","reason":"rule:abc123","would_forward":false}
+```
+
+**Rule actions:**
+
+| Action | Phase | What it does |
+|---|---|---|
+| `block` | Request | Returns 403 before call is forwarded |
+| `allow` | Request | Deny-all except listed prompts |
+| `reroute` | Request | Forward to a different label |
+| `cache` | Request | Return cached response if same prompt seen before |
+| `short_circuit` | Request | Return static reply without forwarding |
+| `rate_limit` | Request | Reject above N req/min per IP |
+| `block_response` | Response | Suppress agent reply, return 200 with error message |
+| `redact` | Response | Strip PII / secrets from agent reply before returning |
+
+**Match types:** `contains` · `regex` · `method` (A2A method name) · `always`
+
+**Compared to alternatives:**
+
+| | Agentgateway | Akamai Firewall for AI | **DANS Firewall** |
+|---|---|---|---|
+| Setup | YAML config + deploy | SaaS signup | POST a rule to an endpoint you already use |
+| Protocol | Standalone proxy | HTTP/API | Built into DANS proxy |
+| Rules | OPA/Cedar/YAML | Managed threat scores | Simple API: contains / regex / method |
+| Best for | Enterprise zero-trust | Akamai edge customers | Anyone already using DANS |
+
 ### Health-aware routing
 DANS runs a background health sweep (default: every 30 s) against every registered endpoint. Unhealthy endpoints are automatically skipped during resolution. If all instances are down, DANS returns the least-recently-failed endpoint as an emergency fallback rather than a hard error.
 
@@ -235,6 +307,12 @@ They're complementary. Use a registry for discovery, DANS for routing.
 | `GET` | `/cache/stats` | Cache hit/miss stats |
 | `POST` | `/cache/clear` | Flush resolution cache |
 | `GET` | `/docs` | Interactive API docs (Swagger UI) |
+| `POST` | `/proxy/{label}` | Proxy a call through the firewall to a resolved agent |
+| `POST` | `/firewall/rules` | Create a firewall rule |
+| `GET` | `/firewall/rules?label=X` | List rules (all, or filtered by label) |
+| `DELETE` | `/firewall/rules/{rule_id}` | Delete a firewall rule |
+| `GET` | `/firewall/stats` | Hit/block/pass/cache counts per label |
+| `POST` | `/firewall/test` | Dry-run: evaluate request (and optional response) against rules |
 
 ### `/register` fields
 
@@ -280,7 +358,7 @@ Access at `http://localhost:8200/`.
 | `AGENTNS_TLD` | `agentns.local` | URN TLD this instance issues |
 | `AGENTNS_NAMESPACE` | `public` | Default URN namespace |
 | `AGENTNS_PORT` | `8200` | HTTP port |
-| `AGENTNS_WORKERS` | `2` | Uvicorn worker count |
+| `AGENTNS_WORKERS` | `1` | Uvicorn worker count (keep at 1 — firewall state is in-memory) |
 | `AGENTNS_HEALTH_INTERVAL` | `30` | Background health sweep interval (seconds) |
 | `MONGODB_URI` | *(empty)* | MongoDB connection string (in-memory if absent) |
 | `MONGODB_DB` | `agentns` | MongoDB database name |
@@ -311,7 +389,8 @@ The public instance runs with `DANS_AUTH=off` — no key needed.
 ```
 dans/
 ├── agentns/
-│   ├── server.py           ← FastAPI app: all HTTP routes
+│   ├── server.py           ← FastAPI app: all HTTP routes + /proxy + /firewall
+│   ├── firewall.py         ← FirewallEngine: rule eval, response filtering, stats
 │   ├── requester_lib.py    ← SDK: resolve agents (caller side)
 │   ├── target_lib.py       ← SDK: register agents (target side)
 │   ├── health_checker.py   ← Background endpoint health probing
@@ -329,6 +408,7 @@ dans/
 │   ├── quickstart_target.py      ← Register your agent at startup
 │   └── custom_registry_adapter.py
 ├── tests/
+│   └── test_api.py         ← 38 tests covering core + firewall endpoints
 ├── scripts/
 │   └── deploy.sh           ← Bootstrap DANS on a fresh server
 ├── Dockerfile.agentns
