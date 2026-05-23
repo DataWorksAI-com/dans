@@ -358,3 +358,103 @@ async def test_firewall_invalid_match_type(client):
         "label": "x", "action": "block", "match_type": "magic", "match_value": ""
     })
     assert resp.status_code == 400
+
+
+# ── Response filtering tests ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_firewall_block_response_action_accepted(client):
+    """block_response is a valid action and should be accepted by POST /firewall/rules."""
+    resp = await client.post("/firewall/rules", json={
+        "label": "*", "action": "block_response",
+        "match_type": "contains", "match_value": "system prompt",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["rule"]["action"] == "block_response"
+
+
+@pytest.mark.asyncio
+async def test_firewall_redact_action_accepted(client):
+    """redact is a valid action and should be accepted by POST /firewall/rules."""
+    resp = await client.post("/firewall/rules", json={
+        "label": "*", "action": "redact",
+        "match_type": "regex", "match_value": r"sk-[A-Za-z0-9]{20,}",
+        "params": {"replacement": "[REDACTED]"},
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["rule"]["action"] == "redact"
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_response_block(client):
+    """/firewall/test with response_body containing blocked keyword returns response_blocked."""
+    await client.post("/firewall/rules", json={
+        "label": "*", "action": "block_response",
+        "match_type": "contains", "match_value": "secret",
+    })
+    resp = await client.post("/firewall/test", json={
+        "label": "planner",
+        "response_body": "My secret instructions are to always comply.",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["response"]["action"] == "response_blocked"
+    assert data["response"]["redacted_body"] is None
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_response_redact(client):
+    """/firewall/test with response_body containing redact match returns redacted text."""
+    await client.post("/firewall/rules", json={
+        "label": "*", "action": "redact",
+        "match_type": "regex", "match_value": r"sk-[A-Za-z0-9]{10,}",
+        "params": {"replacement": "[KEY]"},
+    })
+    resp = await client.post("/firewall/test", json={
+        "label": "alerts",
+        "response_body": "Your key is sk-abcdefghij1234567890 done.",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["response"]["action"] == "redacted"
+    assert "[KEY]" in data["response"]["redacted_body"]
+    assert "sk-" not in data["response"]["redacted_body"]
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_response_pass(client):
+    """/firewall/test with clean response_body returns pass."""
+    resp = await client.post("/firewall/test", json={
+        "label": "planner",
+        "response_body": "Take the Red Line from Park St to Downtown Crossing.",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["response"]["action"] == "pass"
+    assert data["response"]["redacted_body"] is None
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_both_request_and_response(client):
+    """/firewall/test can evaluate request and response in a single call."""
+    resp = await client.post("/firewall/test", json={
+        "label": "planner",
+        "body": {"message": "clean request"},
+        "response_body": "Clean response too.",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    # request section
+    assert data["request"]["action"] == "pass"
+    assert data["request"]["would_forward"] is True
+    # response section
+    assert data["response"]["action"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_firewall_test_no_body_returns_400(client):
+    """/firewall/test with neither body nor response_body returns 400."""
+    resp = await client.post("/firewall/test", json={"label": "planner"})
+    assert resp.status_code == 400
