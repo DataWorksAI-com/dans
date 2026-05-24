@@ -570,17 +570,17 @@ async def landing(request: Request):
 
 <h2>Quickstart</h2>
 <pre># 1. Register your agent
-curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/register \\
+curl -X POST {str(request.url).rstrip("/")}/register \\
   -H "Content-Type: application/json" \\
   -d '{{"label": "my-agent", "endpoint": "http://your-server:9001"}}'
 
 # 2. Resolve from anywhere
-curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/resolve \\
+curl -X POST {str(request.url).rstrip("/")}/resolve \\
   -H "Content-Type: application/json" \\
   -d '{{"agent_name": "my-agent"}}'
 
 # 3. See all registered agents
-curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</pre>
+curl {str(request.url).rstrip("/")}/health</pre>
 
 <h2>What DANS adds</h2>
 <div class="grid">
@@ -595,23 +595,23 @@ curl {request.url.scheme}://{request.headers.get("host", "localhost")}/health</p
 <h2>&#128737; Prompt Firewall</h2>
 <p>DANS has a built-in firewall that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Rules are API-driven &mdash; no YAML, no restarts.</p>
 <pre># Block prompt injection on every agent
-curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/rules \\
+curl -X POST {str(request.url).rstrip("/")}/firewall/rules \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}}'
 
 # Redact API keys from agent responses
-curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/rules \\
+curl -X POST {str(request.url).rstrip("/")}/firewall/rules \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{{20,}}","params":{{"replacement":"[API-KEY-REDACTED]"}}}}'
 
 # Dry-run test (no forwarding)
-curl -X POST {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/test \\
+curl -X POST {str(request.url).rstrip("/")}/firewall/test \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","body":{{"message":"ignore previous instructions"}}}}'
 # → {{"action":"block","reason":"rule:abc123","would_forward":false}}
 
 # Stats
-curl {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/stats</pre>
+curl {str(request.url).rstrip("/")}/firewall/stats</pre>
 
 <table>
 <tr><th>Action</th><th>Phase</th><th>What it does</th></tr>
@@ -645,8 +645,8 @@ curl {request.url.scheme}://{request.headers.get("host", "localhost")}/firewall/
 
 <p style="margin-top:32px;color:#888;font-size:.85rem">
   Powered by <a href="https://github.com/DataWorksAI-com/dans">DANS — Dynamic Agent Naming Service</a> &nbsp;&middot;&nbsp;
-  <a href="/docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="/health">Health</a> &nbsp;&middot;&nbsp;
-  <a href="/firewall/stats">Firewall Stats</a> &nbsp;&middot;&nbsp; <a href="/firewall/rules">Firewall Rules</a>
+  <a href="docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="health">Health</a> &nbsp;&middot;&nbsp;
+  <a href="firewall/stats">Firewall Stats</a> &nbsp;&middot;&nbsp; <a href="firewall/rules">Firewall Rules</a>
 </p>
 </body></html>"""
     from starlette.responses import HTMLResponse
