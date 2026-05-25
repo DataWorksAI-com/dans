@@ -591,6 +591,7 @@ curl {str(request.url).rstrip("/")}/health</pre>
   <div class="card"><h3>&#128279; Federation</h3>Connect multiple DANS instances together, like DNS zones. Resolve agents across networks.</div>
   <div class="card"><h3>&#128737; Prompt Firewall</h3>Built-in A2A firewall. Block prompt injection, redact PII from responses, reroute calls &mdash; zero extra infrastructure.</div>
   <div class="card"><h3>&#128257; A2A Proxy</h3>All calls flow through <code>/proxy/{{label}}</code> &mdash; DANS terminates the inbound connection, resolves the target, and forwards securely.</div>
+  <div class="card"><h3>&#128100; Protocol Intelligence</h3>Agents register which protocols they speak (A2A, MCP, SLIM, gRPC&hellip;). DANS negotiates the best match on every resolve call &mdash; callers never hardcode protocol logic.</div>
 </div>
 
 <h2>&#128737; Prompt Firewall</h2>
@@ -626,11 +627,32 @@ curl {str(request.url).rstrip("/")}/firewall/stats</pre>
 <tr><td><code>redact</code></td><td>Response</td><td>Strip secrets / PII from the agent reply</td></tr>
 </table>
 
+<h2>&#128100; Protocol Intelligence</h2>
+<p>Agents register the protocols they support. DANS negotiates the best match on every resolve call &mdash; callers never hardcode transport decisions.</p>
+<p><strong>Supported protocols:</strong> <code>a2a</code> &nbsp; <code>mcp</code> &nbsp; <code>slim</code> &nbsp; <code>grpc</code> &nbsp; <code>http</code> &nbsp; <code>sse</code> &nbsp; <code>acp</code></p>
+<pre># Register with protocol metadata
+curl -X POST {str(request.url).rstrip("/")}/register \\
+  -d '{{"label":"planner","endpoint":"http://host:50052",
+       "protocols":["a2a","slim"],
+       "protocol_metadata":{{"a2a":{{"version":"0.2.1","path":"/a2a/message"}},
+                             "slim":{{"identity":"myapp/planner"}}}}}}'
+
+# Resolve — caller declares what it speaks; DANS picks best match
+curl -X POST {str(request.url).rstrip("/")}/resolve \\
+  -d '{{"agent_name":"planner","requester_context":{{"protocols":["slim","a2a"]}}}}'
+# → {{"protocol":"slim","negotiated_by":"intersection","protocol_metadata":{{...}},"fallback_protocol":"a2a"}}</pre>
+<table>
+<tr><th>negotiated_by</th><th>Meaning</th></tr>
+<tr><td><code>intersection</code></td><td>Best match from overlap of caller &amp; agent protocols</td></tr>
+<tr><td><code>agent_default</code></td><td>Caller sent no preference; agent&apos;s primary protocol used</td></tr>
+<tr><td><code>fallback</code></td><td>No overlap; falls back to <code>http</code> with <code>warning: no_protocol_match</code></td></tr>
+</table>
+
 <h2>API Reference</h2>
 <table>
 <tr><th>Method</th><th>Path</th><th>Description</th></tr>
-<tr><td>POST</td><td>/register</td><td>Register an agent endpoint</td></tr>
-<tr><td>POST</td><td>/resolve</td><td>Resolve agent name &rarr; endpoint URL</td></tr>
+<tr><td>POST</td><td>/register</td><td>Register an agent endpoint (now accepts <code>protocols</code> + <code>protocol_metadata</code>)</td></tr>
+<tr><td>POST</td><td>/resolve</td><td>Resolve agent name &rarr; endpoint URL (now returns negotiated protocol)</td></tr>
 <tr><td>DELETE</td><td>/register/{{label}}</td><td>Deregister an endpoint</td></tr>
 <tr><td>GET</td><td>/health</td><td>Service health + all registered agents</td></tr>
 <tr><td>GET</td><td>/agents</td><td>List registered agents</td></tr>
