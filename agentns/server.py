@@ -71,7 +71,8 @@ from .cache            import ResolutionCache
 from .firewall         import FirewallEngine, FirewallRule, VALID_ACTIONS
 from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
-from .server_selection import rank_servers, select_protocol, calculate_ttl
+from .server_selection import rank_servers, select_protocol, negotiate_protocol, calculate_ttl
+from agentns import SUPPORTED_PROTOCOLS
 from .urn_parser       import parse_urn, build_urn
 from .tenant           import create_tenant, get_tenant_by_key, namespace_available, init_tenant_collection
 
@@ -961,14 +962,15 @@ async def resolve(request: Request, body: dict):
 
     servers = [
         {
-            "server_id":        ep["endpoint"],
-            "endpoint":         ep["endpoint"],
-            "health_check_url": ep.get("health_check_url", ""),
-            "protocols":        ep.get("protocols", []),
-            "region":           ep.get("region", ""),
-            "region_label":     ep.get("region_label", ep.get("region", "")),
-            "flag":             ep.get("flag", ""),
-            "location":         ep.get("location", {}),
+            "server_id":         ep["endpoint"],
+            "endpoint":          ep["endpoint"],
+            "health_check_url":  ep.get("health_check_url", ""),
+            "protocols":         ep.get("protocols", []),
+            "protocol_metadata": ep.get("protocol_metadata", {}),
+            "region":            ep.get("region", ""),
+            "region_label":      ep.get("region_label", ep.get("region", "")),
+            "flag":              ep.get("flag", ""),
+            "location":          ep.get("location", {}),
         }
         for ep in endpoints
     ]
@@ -1006,17 +1008,20 @@ async def resolve(request: Request, body: dict):
 
     # ── emergency fallback ────────────────────────────────────────────────────
     if not ranked:
-        ep        = servers[0]
-        protocol  = select_protocol(ep["protocols"], preferred_protocols)
-        namespace = ep.get("namespace", DEFAULT_NS)
-        result    = {
-            "endpoint":     ep["endpoint"],
-            "protocol":     protocol,
-            "ttl":          5,
-            "region":       ep.get("region_label") or ep.get("region", ""),
-            "flag":         ep.get("flag", ""),
-            "cached":       False,
-            "selected_by":  "emergency_fallback",
+        ep           = servers[0]
+        negotiation  = negotiate_protocol(ep["protocols"], ep.get("protocol_metadata", {}), preferred_protocols)
+        namespace    = ep.get("namespace", DEFAULT_NS)
+        result       = {
+            "endpoint":          ep["endpoint"],
+            "protocol":          negotiation["protocol"],
+            "negotiated_by":     negotiation["negotiated_by"],
+            "fallback_protocol": negotiation["fallback_protocol"],
+            "protocol_metadata": negotiation["protocol_metadata"],
+            "ttl":               5,
+            "region":            ep.get("region_label") or ep.get("region", ""),
+            "flag":              ep.get("flag", ""),
+            "cached":            False,
+            "selected_by":       "emergency_fallback",
             "resolution_time_ms": round((_time.monotonic() - t0) * 1000, 1),
             "metadata": {
                 "label":            label,
@@ -1024,12 +1029,14 @@ async def resolve(request: Request, body: dict):
                 "all_candidates":   all_candidates,
             },
         }
+        if "warning" in negotiation:
+            result["warning"] = negotiation["warning"]
         result = _build_proxy_response(result, label, namespace)
         return result
 
     best_server, best_health = ranked[0]
-    protocol = select_protocol(best_server["protocols"], preferred_protocols)
-    ttl      = calculate_ttl(best_health)
+    negotiation  = negotiate_protocol(best_server["protocols"], best_server.get("protocol_metadata", {}), preferred_protocols)
+    ttl          = calculate_ttl(best_health)
 
     if len(ranked) == 1:
         selected_by = "only_available"
@@ -1039,13 +1046,16 @@ async def resolve(request: Request, body: dict):
         selected_by = "lowest_latency"
 
     result = {
-        "endpoint":     best_server["endpoint"],
-        "protocol":     protocol,
-        "ttl":          ttl,
-        "region":       best_server["region_label"] or best_server["region"],
-        "flag":         best_server.get("flag", ""),
-        "cached":       False,
-        "selected_by":  selected_by,
+        "endpoint":          best_server["endpoint"],
+        "protocol":          negotiation["protocol"],
+        "negotiated_by":     negotiation["negotiated_by"],
+        "fallback_protocol": negotiation["fallback_protocol"],
+        "protocol_metadata": negotiation["protocol_metadata"],
+        "ttl":               ttl,
+        "region":            best_server["region_label"] or best_server["region"],
+        "flag":              best_server.get("flag", ""),
+        "cached":            False,
+        "selected_by":       selected_by,
         "resolution_time_ms": round((_time.monotonic() - t0) * 1000, 1),
         "metadata": {
             "label":            label,
@@ -1054,6 +1064,8 @@ async def resolve(request: Request, body: dict):
             "all_candidates":   all_candidates,
         },
     }
+    if "warning" in negotiation:
+        result["warning"] = negotiation["warning"]
 
     # Store with agent_name tag so invalidate() can find it.
     # Use a copy so the pop below doesn't remove the tag from the stored payload.
@@ -1100,12 +1112,29 @@ async def register(request: Request, body: dict):
     if not label or not endpoint:
         raise HTTPException(status_code=400, detail="'label' and 'endpoint' are required")
 
-    namespace    = body.get("namespace") or DEFAULT_NS
-    region       = body.get("region") or ""
-    region_label = body.get("region_label") or region
-    location     = body.get("location") or {}
-    protocols    = body.get("protocols") or ["http"]
-    flag         = body.get("flag") or ""
+    namespace         = body.get("namespace") or DEFAULT_NS
+    region            = body.get("region") or ""
+    region_label      = body.get("region_label") or region
+    location          = body.get("location") or {}
+    flag              = body.get("flag") or ""
+
+    # ── protocol normalisation & validation ──────────────────────────────────
+    raw_protocols      = body.get("protocols") or ["http"]
+    protocols          = [p.lower() for p in raw_protocols]
+    unknown_protocols  = [p for p in protocols if p not in SUPPORTED_PROTOCOLS]
+    if unknown_protocols:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown protocol(s): {unknown_protocols}. "
+                f"Supported: {sorted(SUPPORTED_PROTOCOLS)}"
+            ),
+        )
+
+    # protocol_metadata — per-protocol connection hints (version, path, identity, …)
+    # Example: {"a2a": {"version": "0.2.1", "path": "/a2a/message"},
+    #            "slim": {"identity": "mbta/transit-ci/planner"}}
+    protocol_metadata  = body.get("protocol_metadata") or {}
 
     # ── namespace auth (when DANS_AUTH=on) ───────────────────────────────────
     if DANS_AUTH == "on":
@@ -1148,15 +1177,16 @@ async def register(request: Request, body: dict):
     hc_url = (body.get("health_check_url") or "").strip()
 
     entry: Dict[str, Any] = {
-        "endpoint":        endpoint,
-        "health_check_url": hc_url,
-        "namespace":       namespace,
-        "protocols":       protocols,
-        "region":          region,
-        "region_label":    region_label,
-        "flag":            flag,
-        "location":        location,
-        "agent_name":      build_urn(DEFAULT_TLD, namespace, label),
+        "endpoint":          endpoint,
+        "health_check_url":  hc_url,
+        "namespace":         namespace,
+        "protocols":         protocols,
+        "protocol_metadata": protocol_metadata,
+        "region":            region,
+        "region_label":      region_label,
+        "flag":              flag,
+        "location":          location,
+        "agent_name":        build_urn(DEFAULT_TLD, namespace, label),
     }
 
     _registry.setdefault(label, [])
@@ -1176,14 +1206,15 @@ async def register(request: Request, body: dict):
     # Kick off immediate health check (non-blocking)
     asyncio.create_task(_check_single(endpoint, hc_url))
 
-    logger.info(f"{action}: label={label!r} endpoint={endpoint} region={region_label!r} geo={'active' if _location_resolved else 'disabled'}")
+    logger.info(f"{action}: label={label!r} endpoint={endpoint} protocols={protocols} region={region_label!r} geo={'active' if _location_resolved else 'disabled'}")
     return {
-        "status":          action,
-        "label":           label,
-        "endpoint":        endpoint,
-        "agent_name":      entry["agent_name"],
-        "total_endpoints": len(_registry[label]),
-        "geo_routing":     "active" if _location_resolved else "disabled — pass latitude/longitude to enable",
+        "status":            action,
+        "label":             label,
+        "endpoint":          endpoint,
+        "agent_name":        entry["agent_name"],
+        "protocols":         protocols,
+        "total_endpoints":   len(_registry[label]),
+        "geo_routing":       "active" if _location_resolved else "disabled — pass latitude/longitude to enable",
     }
 
 
@@ -1336,15 +1367,16 @@ async def list_agents():
         for ep in eps:
             h = _cached_health(ep["endpoint"])
             result[label].append({
-                "endpoint":   ep["endpoint"],
-                "agent_name": ep.get("agent_name", ""),
-                "namespace":  ep.get("namespace", ""),
-                "region":     ep.get("region_label") or ep.get("region", ""),
-                "flag":       ep.get("flag", ""),
-                "protocols":  ep.get("protocols", []),
-                "status":     h.get("status", "unknown"),
-                "latency_ms": round(h.get("response_time_ms", 0.0), 1),
-                "last_check": h.get("last_check"),
+                "endpoint":          ep["endpoint"],
+                "agent_name":        ep.get("agent_name", ""),
+                "namespace":         ep.get("namespace", ""),
+                "region":            ep.get("region_label") or ep.get("region", ""),
+                "flag":              ep.get("flag", ""),
+                "protocols":         ep.get("protocols", []),
+                "protocol_metadata": ep.get("protocol_metadata", {}),
+                "status":            h.get("status", "unknown"),
+                "latency_ms":        round(h.get("response_time_ms", 0.0), 1),
+                "last_check":        h.get("last_check"),
             })
     return result
 

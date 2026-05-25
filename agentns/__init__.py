@@ -50,9 +50,21 @@ Environment variables
     MONGODB_DB               MongoDB database name         (default: ans_public)
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __author__  = "DataWorksAI"  # Original authors — see LICENSE
 __license__ = "MIT"
+
+# ── Protocol vocabulary ────────────────────────────────────────────────────────
+# Canonical set of protocol identifiers DANS understands.
+# Agents register using these names; DANS negotiates the best match on resolve.
+#   a2a   — Google A2A / JSON-RPC over HTTP (agent-to-agent)
+#   mcp   — Anthropic Model Context Protocol (LLM-to-tool, stdio or HTTP)
+#   slim  — Cisco AGNTCY secure messaging bus (identity-routed)
+#   grpc  — gRPC binary protocol (strongly typed, many enterprise agents)
+#   sse   — HTTP Server-Sent Events (streaming responses)
+#   acp   — IBM BeeAgent ACP (REST-based agent communication)
+#   http  — Plain HTTP REST (universal fallback)
+SUPPORTED_PROTOCOLS: frozenset = frozenset({"a2a", "mcp", "slim", "grpc", "http", "sse", "acp"})
 
 # ── Firewall ───────────────────────────────────────────────────────────────────
 from agentns.firewall import FirewallRule
@@ -78,6 +90,8 @@ from agentns.target_lib import (
 from agentns import requester_lib, target_lib
 
 __all__ = [
+    # Protocol vocabulary
+    "SUPPORTED_PROTOCOLS",
     # Firewall
     "FirewallRule",
     # Requester side

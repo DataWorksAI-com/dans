@@ -304,12 +304,77 @@ def select_protocol(server_protocols: List[str], preferred: List[str]) -> str:
     """
     Pick the best protocol from *server_protocols* given *preferred* order.
     Falls back to the first server protocol, or "http".
+
+    Returns lowercase protocol string for consistent downstream handling.
+    Kept for backward compatibility — prefer negotiate_protocol() for new code.
     """
-    upper_server = [p.upper() for p in (server_protocols or [])]
+    norm_server = [p.lower() for p in (server_protocols or [])]
     for p in preferred:
-        if p.upper() in upper_server:
-            return p.upper()
-    return server_protocols[0] if server_protocols else "http"
+        if p.lower() in norm_server:
+            return p.lower()
+    return norm_server[0] if norm_server else "http"
+
+
+def negotiate_protocol(
+    server_protocols: List[str],
+    server_protocol_metadata: Dict,
+    caller_preferred: List[str],
+) -> Dict:
+    """
+    Negotiate the best protocol between what a server supports and what a
+    caller prefers.  Returns a rich dict consumed directly by /resolve.
+
+    Negotiation strategy (in priority order):
+      1. intersection  — caller's first preferred protocol that the server also supports
+      2. agent_default — caller sent no preferences; use agent's primary (first) protocol
+      3. fallback      — no overlap; return "http" with a warning
+
+    Return dict keys:
+      protocol          — chosen protocol (lowercase)
+      negotiated_by     — "intersection" | "agent_default" | "fallback"
+      fallback_protocol — next best option if the primary fails (or None)
+      warning           — present only when negotiated_by == "fallback"
+      protocol_metadata — metadata dict from registration for the chosen protocol
+    """
+    norm_server = [p.lower() for p in (server_protocols or [])]
+    norm_caller = [p.lower() for p in (caller_preferred or [])]
+    meta = server_protocol_metadata or {}
+
+    chosen = None
+    negotiated_by = "fallback"
+    warning = None
+
+    if norm_caller:
+        # Try each caller-preferred protocol in order
+        for p in norm_caller:
+            if p in norm_server:
+                chosen = p
+                negotiated_by = "intersection"
+                break
+    elif norm_server:
+        # Caller expressed no preference — use agent's primary protocol
+        chosen = norm_server[0]
+        negotiated_by = "agent_default"
+
+    if chosen is None:
+        # No overlap at all — universal fallback
+        chosen = "http"
+        negotiated_by = "fallback"
+        warning = "no_protocol_match"
+
+    # Fallback: next protocol in server's list that isn't the chosen one, else "http"
+    fallback = next(
+        (p for p in norm_server if p != chosen),
+        "http" if chosen != "http" else None,
+    )
+
+    return {
+        "protocol":          chosen,
+        "negotiated_by":     negotiated_by,
+        "fallback_protocol": fallback,
+        "protocol_metadata": meta.get(chosen, {}),
+        **({"warning": warning} if warning else {}),
+    }
 
 
 def calculate_ttl(health: Dict) -> int:

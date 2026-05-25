@@ -458,3 +458,178 @@ async def test_firewall_test_no_body_returns_400(client):
     """/firewall/test with neither body nor response_body returns 400."""
     resp = await client.post("/firewall/test", json={"label": "planner"})
     assert resp.status_code == 400
+
+
+# ── Protocol Intelligence tests ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_register_with_protocols_stored(client):
+    """Registering with protocols=[a2a, slim] should persist and appear in /agents."""
+    resp = await client.post("/register", json={
+        "label": "proto-agent",
+        "endpoint": "http://test-agent:9010",
+        "protocols": ["a2a", "slim"],
+        "protocol_metadata": {
+            "a2a":  {"version": "0.2.1", "path": "/a2a/message"},
+            "slim": {"identity": "test/ns/proto-agent"},
+        },
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "registered"
+    assert "a2a" in data["protocols"]
+    assert "slim" in data["protocols"]
+
+    # Verify metadata is stored
+    agents = (await client.get("/agents")).json()
+    entry = agents["proto-agent"][0]
+    assert entry["protocols"] == ["a2a", "slim"]
+    assert entry["protocol_metadata"]["a2a"]["version"] == "0.2.1"
+    assert entry["protocol_metadata"]["slim"]["identity"] == "test/ns/proto-agent"
+
+
+@pytest.mark.asyncio
+async def test_register_unknown_protocol_rejected(client):
+    """Registering with an unknown protocol name should return 400."""
+    resp = await client.post("/register", json={
+        "label": "bad-proto",
+        "endpoint": "http://test-agent:9011",
+        "protocols": ["a2a", "quantum_teleport"],
+    })
+    assert resp.status_code == 400
+    assert "quantum_teleport" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_register_protocols_normalized_lowercase(client):
+    """Protocols sent as uppercase should be stored as lowercase."""
+    resp = await client.post("/register", json={
+        "label": "upper-proto",
+        "endpoint": "http://test-agent:9012",
+        "protocols": ["A2A", "HTTP"],
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "a2a" in data["protocols"]
+    assert "http" in data["protocols"]
+    # No uppercase variants
+    assert "A2A" not in data["protocols"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_negotiates_intersection(client):
+    """When caller speaks a2a and agent supports a2a+slim, resolve returns a2a via intersection."""
+    await client.post("/register", json={
+        "label": "multi-proto",
+        "endpoint": "http://test-agent:9013",
+        "protocols": ["a2a", "slim"],
+        "protocol_metadata": {"a2a": {"version": "0.2.1"}},
+    })
+    resp = await client.post("/resolve", json={
+        "agent_name": "multi-proto",
+        "requester_context": {"protocols": ["a2a"]},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["protocol"] == "a2a"
+    assert data["negotiated_by"] == "intersection"
+    assert data["protocol_metadata"]["version"] == "0.2.1"
+    assert "fallback_protocol" in data
+
+
+@pytest.mark.asyncio
+async def test_resolve_agent_default_when_no_caller_preference(client):
+    """When caller sends no preferred protocols, DANS uses agent's primary protocol."""
+    await client.post("/register", json={
+        "label": "default-proto",
+        "endpoint": "http://test-agent:9014",
+        "protocols": ["slim"],
+        "protocol_metadata": {"slim": {"identity": "test/ns/default-proto"}},
+    })
+    resp = await client.post("/resolve", json={
+        "agent_name": "default-proto",
+        "requester_context": {},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["protocol"] == "slim"
+    assert data["negotiated_by"] == "agent_default"
+    assert data["protocol_metadata"]["identity"] == "test/ns/default-proto"
+
+
+@pytest.mark.asyncio
+async def test_resolve_fallback_when_no_overlap(client):
+    """When caller speaks only mcp and agent speaks only a2a, DANS falls back to http with warning."""
+    await client.post("/register", json={
+        "label": "no-overlap",
+        "endpoint": "http://test-agent:9015",
+        "protocols": ["a2a"],
+    })
+    resp = await client.post("/resolve", json={
+        "agent_name": "no-overlap",
+        "requester_context": {"protocols": ["mcp"]},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["protocol"] == "http"
+    assert data["negotiated_by"] == "fallback"
+    assert data.get("warning") == "no_protocol_match"
+
+
+@pytest.mark.asyncio
+async def test_resolve_default_http_when_no_protocols_registered(client):
+    """Legacy agent registered without protocols field defaults to http."""
+    await client.post("/register", json={
+        "label": "legacy-agent",
+        "endpoint": "http://test-agent:9016",
+        # no protocols field
+    })
+    resp = await client.post("/resolve", json={
+        "agent_name": "legacy-agent",
+        "requester_context": {},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["protocol"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_supported_protocols_constant():
+    """SUPPORTED_PROTOCOLS constant should contain the canonical protocol set."""
+    from agentns import SUPPORTED_PROTOCOLS
+    assert "a2a" in SUPPORTED_PROTOCOLS
+    assert "mcp" in SUPPORTED_PROTOCOLS
+    assert "slim" in SUPPORTED_PROTOCOLS
+    assert "grpc" in SUPPORTED_PROTOCOLS
+    assert "http" in SUPPORTED_PROTOCOLS
+    assert "sse" in SUPPORTED_PROTOCOLS
+    assert "acp" in SUPPORTED_PROTOCOLS
+
+
+@pytest.mark.asyncio
+async def test_negotiate_protocol_unit():
+    """Unit test for negotiate_protocol() covering all three negotiation paths."""
+    from agentns.server_selection import negotiate_protocol
+
+    # intersection: caller prefers a2a, agent supports a2a + slim
+    r = negotiate_protocol(["a2a", "slim"], {"a2a": {"version": "0.2.1"}}, ["a2a"])
+    assert r["protocol"] == "a2a"
+    assert r["negotiated_by"] == "intersection"
+    assert r["protocol_metadata"] == {"version": "0.2.1"}
+    assert r["fallback_protocol"] == "slim"
+
+    # agent_default: caller sends no preferences
+    r = negotiate_protocol(["slim"], {"slim": {"identity": "x"}}, [])
+    assert r["protocol"] == "slim"
+    assert r["negotiated_by"] == "agent_default"
+
+    # fallback: no overlap
+    r = negotiate_protocol(["a2a"], {}, ["mcp"])
+    assert r["protocol"] == "http"
+    assert r["negotiated_by"] == "fallback"
+    assert r["warning"] == "no_protocol_match"
+
+    # caller's second preference matches
+    r = negotiate_protocol(["slim", "a2a"], {}, ["mcp", "a2a"])
+    assert r["protocol"] == "a2a"
+    assert r["negotiated_by"] == "intersection"
