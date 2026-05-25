@@ -533,7 +533,7 @@ async def landing(request: Request):
     if "text/html" not in request.headers.get("accept", ""):
         return {
             "service": "agentns",
-            "version": "3.0.0",
+            "version": "3.1.0",
             "docs":    "/docs",
             "health":  "/health",
             "firewall": {
@@ -1327,7 +1327,7 @@ async def health():
         "ok":                      overall == "ok",
         "status":                  overall,
         "service":                 "agentns",
-        "version":                 "3.0.0",
+        "version":                 "3.1.0",
         "namespace":               DEFAULT_NS,
         "tld":                     DEFAULT_TLD,
         "mongodb_connected":       _mongo_col is not None,
@@ -1913,7 +1913,7 @@ def main() -> None:
     _fed_display   = f"{len(_federation)} registr(ies): {list(_federation)}" if _federation else "disabled"
     print(f"""
 ╔══════════════════════════════════════════════╗
-║          agentns  v3.0.0  starting           ║
+║          agentns  v3.1.0  starting           ║
 ╚══════════════════════════════════════════════╝
   Port         : {args.port}
   TLD          : {DEFAULT_TLD}
