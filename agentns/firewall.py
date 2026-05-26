@@ -54,6 +54,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
+import sys
 import time
 import uuid
 from collections import defaultdict
@@ -62,6 +64,76 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("agentns.firewall")
+
+# ── Security constants ─────────────────────────────────────────────────────────
+_MAX_REGEX_LEN      = 512          # max bytes for a regex match_value
+_REGEX_TEST_TIMEOUT = 0.5          # seconds before a regex is rejected as ReDoS risk
+_MAX_CACHE_TTL      = 3600         # cap cache TTL at 1 hour
+
+# ── Static ReDoS heuristics ────────────────────────────────────────────────────
+# These patterns detect common catastrophically backtracking constructs before
+# running any dynamic test.  They are fast (compile-time only) and cover the
+# most frequent ReDoS anti-patterns.
+_REDOS_STATIC = re.compile(
+    r"""
+    # nested quantifiers on a group  e.g. (a+)+ (a*)+ (a+)* (a*)*
+    \([^)]+[+*]\)\s*[+*?]
+    |
+    # alternation with overlap inside a repeated group  e.g. (a|aa)+
+    \([^)]*\|[^)]*\)\s*[+*]
+    """,
+    re.VERBOSE,
+)
+
+
+def _validate_regex(pattern: str) -> None:
+    """
+    Validate a user-supplied regex pattern at rule-creation time.
+
+    Two-layer defence:
+    1. Static heuristic: immediately reject known nested-quantifier ReDoS shapes.
+    2. Dynamic subprocess test: run the pattern against an adversarial string in a
+       child process with a hard OS-level timeout.  The subprocess is killed by the
+       OS if it does not exit within _REGEX_TEST_TIMEOUT seconds, which is immune to
+       Python's GIL (thread-based timeouts cannot stop a C-extension regex).
+
+    Raises ValueError with a descriptive message on rejection.
+    """
+    if len(pattern) > _MAX_REGEX_LEN:
+        raise ValueError(f"Regex pattern exceeds {_MAX_REGEX_LEN} character limit")
+    try:
+        re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex: {exc}") from exc
+
+    # ── Layer 1: static heuristic (instantaneous) ──────────────────────────────
+    if _REDOS_STATIC.search(pattern):
+        raise ValueError(
+            "Regex pattern contains nested quantifiers that may cause catastrophic "
+            "backtracking (ReDoS). Use 'contains' match type or simplify the pattern."
+        )
+
+    # ── Layer 2: dynamic subprocess test ──────────────────────────────────────
+    # Run the regex against an adversarial string in an isolated child process.
+    # If the child does not finish within the timeout, the OS kills it — this is
+    # immune to Python's GIL and reliably terminates any runaway regex.
+    _script = (
+        "import re, sys; "
+        f"re.search({pattern!r}, 'a'*80+chr(0), re.IGNORECASE); "
+        "sys.exit(0)"
+    )
+    try:
+        subprocess.run(
+            [sys.executable, "-c", _script],
+            timeout=_REGEX_TEST_TIMEOUT,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            "Regex pattern appears catastrophic (possible ReDoS) — rejected. "
+            "Simplify the pattern or use 'contains' match type instead."
+        )
+
 
 # ── Data structures ────────────────────────────────────────────────────────────
 
@@ -158,11 +230,19 @@ class FirewallEngine:
     # ── Rule management ────────────────────────────────────────────────────────
 
     async def add_rule(self, rule: FirewallRule) -> FirewallRule:
+        # NOTE: regex validation (ReDoS check) is intentionally done at the HTTP route
+        # layer via asyncio.get_event_loop().run_in_executor() so it does not block the
+        # event loop.  add_rule() stores the pre-validated rule only.
         self._rules[rule.label].append(rule)
         self._rules[rule.label].sort(key=lambda r: r.priority)
         if self._mongo_col is not None:
             await self._save_rule(rule)
-        logger.info(f"firewall: rule added — {rule.rule_id} label={rule.label!r} action={rule.action} match={rule.match_type}:{rule.match_value!r}")
+        # Security: never interpolate match_value raw — use repr() to neutralise ANSI/newlines
+        safe_value = repr(rule.match_value[:80])
+        logger.info(
+            f"firewall: rule added — {rule.rule_id} label={rule.label!r} "
+            f"action={rule.action} match={rule.match_type}:{safe_value}"
+        )
         return rule
 
     async def remove_rule(self, rule_id: str) -> bool:
@@ -376,10 +456,12 @@ class FirewallEngine:
         if mt == "contains":
             return mv.lower() in body_str.lower()
         if mt == "regex":
+            # All regex rules were validated by _validate_regex() at creation time
+            # (static heuristic + subprocess timeout), so catastrophic backtracking
+            # should not occur here.  Evaluate directly.
             try:
                 return bool(re.search(mv, body_str, re.IGNORECASE))
             except re.error:
-                logger.warning(f"firewall: invalid regex in rule {rule.rule_id!r}: {mv!r}")
                 return False
         return False
 
@@ -400,15 +482,18 @@ class FirewallEngine:
         return payload
 
     def cache_set(self, label: str, body: bytes, response: dict, ttl: int) -> None:
+        ttl = min(ttl, _MAX_CACHE_TTL)   # enforce cap even if bypassed via direct call
         key = self._cache_key(label, body)
         self._cache[key] = (response, time.monotonic() + ttl)
 
     def get_cache_ttl_for(self, label: str, body_str: str, a2a_method: str) -> Optional[int]:
-        """Return cache TTL (seconds) if a cache rule matches, else None."""
+        """Return cache TTL (seconds) if a cache rule matches, else None.
+        TTL is capped at _MAX_CACHE_TTL (1 hour) to prevent indefinite cache poisoning."""
         for bucket in ("*", label):
             for rule in self._rules.get(bucket, []):
                 if rule.action == "cache" and self._matches(rule, body_str, a2a_method):
-                    return int(rule.params.get("ttl", 300))
+                    raw_ttl = int(rule.params.get("ttl", 300))
+                    return min(raw_ttl, _MAX_CACHE_TTL)
         return None
 
     # ── Stats ──────────────────────────────────────────────────────────────────

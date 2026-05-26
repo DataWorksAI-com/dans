@@ -53,6 +53,8 @@ Configuration (environment variables — zero hardcoded values)
 from __future__ import annotations
 
 import asyncio
+import html as _html
+import ipaddress
 import json
 import logging
 import os
@@ -60,6 +62,7 @@ import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 import uvicorn
@@ -68,7 +71,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth             import security_headers_middleware
 from .cache            import ResolutionCache
-from .firewall         import FirewallEngine, FirewallRule, VALID_ACTIONS
+from .firewall         import FirewallEngine, FirewallRule, VALID_ACTIONS, _validate_regex
 from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
 from .server_selection import rank_servers, select_protocol, negotiate_protocol, calculate_ttl
@@ -116,6 +119,13 @@ MONGODB_DB       = os.getenv("MONGODB_DB",                  "agentns")
 # Leave unset for a fully standalone ANS instance.
 #   ANS_FALLBACK_URL=http://my-registry:6900
 ANS_FALLBACK_URL = os.getenv("ANS_FALLBACK_URL", "").rstrip("/")
+# Validate at import time so misconfigurations surface on startup, not at runtime
+if ANS_FALLBACK_URL:
+    _parsed_fallback = urlparse(ANS_FALLBACK_URL)
+    if _parsed_fallback.scheme not in ("http", "https"):
+        raise RuntimeError(
+            f"ANS_FALLBACK_URL must use http or https scheme: {ANS_FALLBACK_URL!r}"
+        )
 
 # DANS_AUTH — "on" requires X-API-Key on write endpoints (register/deregister)
 # "off" (default) runs open — suitable for internal/sidecar use
@@ -159,6 +169,58 @@ else:
     _PROXY_ENDPOINTS = []
 
 _start_time = _time.time()
+
+# ── Input validation constants ─────────────────────────────────────────────────
+_MAX_LABEL_LEN       = 128
+_MAX_ENDPOINT_LEN    = 512
+_MAX_MATCH_VALUE_LEN = 512   # enforced at the API layer before firewall sees it
+_MAX_PROXY_RESP_SIZE = 10 * 1024 * 1024   # 10 MB — max upstream response buffered in memory
+
+# Semaphore: max concurrent live health checks during a single /resolve call.
+# Without this, an attacker who registers 1000 endpoints can trigger 1000 simultaneous
+# outbound HTTP connections with one /resolve request.
+_HEALTH_CHECK_SEM = asyncio.Semaphore(10)
+
+
+def _validate_remote_url(url: str, field_name: str = "url") -> None:
+    """
+    Validate that a user-supplied URL is safe to use as a remote target.
+
+    Rejects:
+    - Non-http/https schemes   (prevents file://, ftp://, etc.)
+    - Private / loopback IPs   (prevents SSRF against internal services)
+    - Link-local IPs           (prevents cloud metadata endpoint abuse: 169.254.x.x)
+    - Missing hostname
+
+    Raises HTTPException(400) on failure.
+    """
+    if not url:
+        raise HTTPException(400, f"'{field_name}' is required")
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise HTTPException(400, f"'{field_name}' is not a valid URL")
+
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            400,
+            f"'{field_name}' must use http or https scheme (got {parsed.scheme!r})",
+        )
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(400, f"'{field_name}' must include a hostname")
+
+    # Block numeric IPs that resolve to private/reserved ranges
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise HTTPException(
+                400,
+                f"'{field_name}' must not point to a private or reserved IP address",
+            )
+    except ValueError:
+        pass  # domain name — allow (DNS rebinding is out of scope for this layer)
+
 
 # ── Federation / Switchboard ───────────────────────────────────────────────────
 # Maps TLD → {url, registry_id, type, status, added_at}
@@ -544,6 +606,8 @@ async def landing(request: Request):
             },
         }
     tld = DEFAULT_TLD
+    # HTML-escape the URL to prevent reflected XSS via crafted request paths
+    safe_base_url = _html.escape(str(request.url).rstrip("/"))
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -571,17 +635,17 @@ async def landing(request: Request):
 
 <h2>Quickstart</h2>
 <pre># 1. Register your agent
-curl -X POST {str(request.url).rstrip("/")}/register \\
+curl -X POST {safe_base_url}/register \\
   -H "Content-Type: application/json" \\
   -d '{{"label": "my-agent", "endpoint": "http://your-server:9001"}}'
 
 # 2. Resolve from anywhere
-curl -X POST {str(request.url).rstrip("/")}/resolve \\
+curl -X POST {safe_base_url}/resolve \\
   -H "Content-Type: application/json" \\
   -d '{{"agent_name": "my-agent"}}'
 
 # 3. See all registered agents
-curl {str(request.url).rstrip("/")}/health</pre>
+curl {safe_base_url}/health</pre>
 
 <h2>What DANS adds</h2>
 <div class="grid">
@@ -597,23 +661,23 @@ curl {str(request.url).rstrip("/")}/health</pre>
 <h2>&#128737; Prompt Firewall</h2>
 <p>DANS has a built-in firewall that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Rules are API-driven &mdash; no YAML, no restarts.</p>
 <pre># Block prompt injection on every agent
-curl -X POST {str(request.url).rstrip("/")}/firewall/rules \\
+curl -X POST {safe_base_url}/firewall/rules \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}}'
 
 # Redact API keys from agent responses
-curl -X POST {str(request.url).rstrip("/")}/firewall/rules \\
+curl -X POST {safe_base_url}/firewall/rules \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{{20,}}","params":{{"replacement":"[API-KEY-REDACTED]"}}}}'
 
 # Dry-run test (no forwarding)
-curl -X POST {str(request.url).rstrip("/")}/firewall/test \\
+curl -X POST {safe_base_url}/firewall/test \\
   -H "Content-Type: application/json" \\
   -d '{{"label":"*","body":{{"message":"ignore previous instructions"}}}}'
 # → {{"action":"block","reason":"rule:abc123","would_forward":false}}
 
 # Stats
-curl {str(request.url).rstrip("/")}/firewall/stats</pre>
+curl {safe_base_url}/firewall/stats</pre>
 
 <table>
 <tr><th>Action</th><th>Phase</th><th>What it does</th></tr>
@@ -631,14 +695,14 @@ curl {str(request.url).rstrip("/")}/firewall/stats</pre>
 <p>Agents register the protocols they support. DANS negotiates the best match on every resolve call &mdash; callers never hardcode transport decisions.</p>
 <p><strong>Supported protocols:</strong> <code>a2a</code> &nbsp; <code>mcp</code> &nbsp; <code>slim</code> &nbsp; <code>grpc</code> &nbsp; <code>http</code> &nbsp; <code>sse</code> &nbsp; <code>acp</code></p>
 <pre># Register with protocol metadata
-curl -X POST {str(request.url).rstrip("/")}/register \\
+curl -X POST {safe_base_url}/register \\
   -d '{{"label":"planner","endpoint":"http://host:50052",
        "protocols":["a2a","slim"],
        "protocol_metadata":{{"a2a":{{"version":"0.2.1","path":"/a2a/message"}},
                              "slim":{{"identity":"myapp/planner"}}}}}}'
 
 # Resolve — caller declares what it speaks; DANS picks best match
-curl -X POST {str(request.url).rstrip("/")}/resolve \\
+curl -X POST {safe_base_url}/resolve \\
   -d '{{"agent_name":"planner","requester_context":{{"protocols":["slim","a2a"]}}}}'
 # → {{"protocol":"slim","negotiated_by":"intersection","protocol_metadata":{{...}},"fallback_protocol":"a2a"}}</pre>
 <table>
@@ -733,9 +797,16 @@ async def _federated_resolve(remote_url: str, body: Dict) -> Dict:
             result = resp.json()
             result["federated_from"] = remote_url   # tag so caller knows it came from federation
             return result
-        # Propagate remote errors (404 = not found there either, etc.)
-        detail = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
-        raise HTTPException(status_code=resp.status_code, detail=f"[{remote_url}] {detail}")
+        # Log the full error server-side but NEVER return remote response body to caller —
+        # it may contain secrets, DB errors, or PII from the remote system.
+        logger.warning(
+            f"federated_resolve: upstream {resp.status_code} from {remote_url}: "
+            f"{resp.text[:300]}"
+        )
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Remote registry returned {resp.status_code}",
+        )
     except HTTPException:
         raise
     except httpx.ConnectError:
@@ -999,15 +1070,18 @@ async def resolve(request: Request, body: dict):
 
     health_map = {s["server_id"]: _cached_health(s["server_id"]) for s in servers}
 
-    # Live-check any endpoint not yet in cache
+    # Live-check any endpoint not yet in cache.
+    # Semaphore cap: prevent a single /resolve call from spawning unlimited outbound
+    # HTTP connections (DoS vector when an attacker registers many endpoints).
     unchecked = [s for s in servers if health_map[s["server_id"]]["status"] == "unknown"]
     if unchecked:
         async def _live(s: Dict) -> None:
-            result = await check_agent_health(s["health_check_url"]) if s["health_check_url"] \
-                else await probe_endpoint(s["endpoint"])
-            async with _health_lock:
-                _health_cache[s["server_id"]] = result
-            health_map[s["server_id"]] = result
+            async with _HEALTH_CHECK_SEM:
+                result = await check_agent_health(s["health_check_url"]) if s["health_check_url"] \
+                    else await probe_endpoint(s["endpoint"])
+                async with _health_lock:
+                    _health_cache[s["server_id"]] = result
+                health_map[s["server_id"]] = result
         await asyncio.gather(*[_live(s) for s in unchecked], return_exceptions=True)
 
     # ── rank ──────────────────────────────────────────────────────────────────
@@ -1110,7 +1184,7 @@ async def resolve(request: Request, body: dict):
 # ── POST /register ─────────────────────────────────────────────────────────────
 
 @app.post("/register", status_code=200)
-@_limit("60/minute")
+@_limit("20/minute")
 async def register(request: Request, body: dict):
     """
     Register an agent endpoint.
@@ -1133,6 +1207,20 @@ async def register(request: Request, body: dict):
 
     if not label or not endpoint:
         raise HTTPException(status_code=400, detail="'label' and 'endpoint' are required")
+    if len(label) > _MAX_LABEL_LEN:
+        raise HTTPException(400, f"'label' must be ≤ {_MAX_LABEL_LEN} characters")
+    if len(endpoint) > _MAX_ENDPOINT_LEN:
+        raise HTTPException(400, f"'endpoint' must be ≤ {_MAX_ENDPOINT_LEN} characters")
+    # Validate endpoint scheme — only http/https are safe to forward requests to.
+    # We do NOT block private IPs here because agents legitimately run on internal
+    # networks (sidecars, LAN deployments).  Scheme validation prevents file://,
+    # ftp://, javascript:, and other dangerous URI schemes from being registered.
+    _ep_parsed = urlparse(endpoint)
+    if _ep_parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            400,
+            f"'endpoint' must use http or https scheme (got {_ep_parsed.scheme!r})",
+        )
 
     namespace         = body.get("namespace") or DEFAULT_NS
     region            = body.get("region") or ""
@@ -1494,6 +1582,8 @@ async def switchboard_register(body: dict):
         raise HTTPException(400, f"'{tld}' is this instance's own TLD — cannot register as remote")
     if rtype not in ("dans", "registry"):
         raise HTTPException(400, "'type' must be 'dans' or 'registry'")
+    # SSRF defence — reject private/loopback/link-local targets
+    _validate_remote_url(url, "url")
 
     registry_id = (body.get("registry_id") or tld).strip()
 
@@ -1565,6 +1655,16 @@ _HOP_BY_HOP = frozenset([
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade",
     "host", "content-length",
+])
+
+# Headers that a caller could use to override the Host seen by the upstream agent
+# (host header injection / SSRF amplification).  Strip these before forwarding.
+_INJECTED_HOST_HEADERS = frozenset([
+    "x-forwarded-host",
+    "x-original-host",
+    "x-host",
+    "x-real-ip",          # caller-supplied IP that some frameworks trust over socket IP
+    "x-forwarded-server",
 ])
 
 
@@ -1648,7 +1748,11 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
     a2a_method = ""
     if body:
         try:
-            a2a_method = json.loads(body).get("method", "")
+            _raw_method = json.loads(body).get("method", "")
+            # Ensure it's a plain string (guards against JSON injection or type confusion)
+            # and cap length so it can't bloat logs or bypass fixed-width firewall checks.
+            if isinstance(_raw_method, str):
+                a2a_method = _raw_method[:128]
         except Exception:
             pass
 
@@ -1679,10 +1783,14 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
     if _fw_decision.modified_body is not None:
         body = _fw_decision.modified_body
 
-    # ── 5. strip hop-by-hop headers ───────────────────────────────────────────
+    # ── 5. strip hop-by-hop and host-injection headers ────────────────────────
+    # _HOP_BY_HOP  — RFC 2616 §13.5.1 connection-management headers
+    # _INJECTED_HOST_HEADERS — caller-supplied Host override headers that upstream
+    #   frameworks may trust; stripping prevents Host header injection / SSRF pivot.
+    _strip = _HOP_BY_HOP | _INJECTED_HOST_HEADERS
     fwd_headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in _HOP_BY_HOP
+        if k.lower() not in _strip
     }
 
     # ── 6. forward and stream the response back ────────────────────────────────
@@ -1725,11 +1833,26 @@ async def proxy_agent(request: Request, label: str, path: str = ""):
                 media_type  = content_type,
             )
 
-        # Normal response — buffer then return
+        # Normal response — buffer then return.
+        # Check Content-Length first to avoid buffering giant responses in memory.
+        _cl = upstream.headers.get("content-length")
+        if _cl and int(_cl) > _MAX_PROXY_RESP_SIZE:
+            await upstream.aclose()
+            return JSONResponse(
+                {"error": "response_too_large",
+                 "message": f"Upstream response exceeds {_MAX_PROXY_RESP_SIZE // (1024*1024)}MB limit"},
+                status_code=502,
+            )
         try:
             content = await upstream.aread()
         finally:
             await upstream.aclose()   # close response only, NOT the shared client
+        if len(content) > _MAX_PROXY_RESP_SIZE:
+            return JSONResponse(
+                {"error": "response_too_large",
+                 "message": f"Upstream response exceeds {_MAX_PROXY_RESP_SIZE // (1024*1024)}MB limit"},
+                status_code=502,
+            )
 
         # ── 9. Response Firewall — evaluate agent reply before returning it ───
         if content:
@@ -1805,6 +1928,23 @@ async def firewall_add_rule(body: dict):
         raise HTTPException(400, f"Invalid action {action!r}. Must be one of: {', '.join(sorted(VALID_ACTIONS))}")
     if match_type not in {"contains", "regex", "method", "always"}:
         raise HTTPException(400, f"Invalid match_type {match_type!r}. Must be one of: contains, regex, method, always")
+    if len(match_value) > _MAX_MATCH_VALUE_LEN:
+        raise HTTPException(
+            400,
+            f"'match_value' must be ≤ {_MAX_MATCH_VALUE_LEN} characters "
+            f"(got {len(match_value)})",
+        )
+
+    # Validate regex patterns off the event loop.
+    # _validate_regex() does a blocking thread join (200ms timeout) to detect
+    # catastrophic backtracking (ReDoS).  Running it in an executor thread means
+    # the event loop is not blocked while the test regex executes.
+    if match_type == "regex":
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, _validate_regex, match_value)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     rule = FirewallRule(
         label       = label,

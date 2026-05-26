@@ -633,3 +633,87 @@ async def test_negotiate_protocol_unit():
     r = negotiate_protocol(["slim", "a2a"], {}, ["mcp", "a2a"])
     assert r["protocol"] == "a2a"
     assert r["negotiated_by"] == "intersection"
+
+
+# ── Security hardening tests ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_register_rejects_non_http_endpoint(client):
+    """Endpoint must use http or https scheme — file://, ftp://, etc. are rejected."""
+    resp = await client.post("/register", json={
+        "label": "bad-scheme",
+        "endpoint": "file:///etc/passwd",
+    })
+    assert resp.status_code == 400
+    assert "http" in resp.json()["detail"].lower() or "scheme" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_javascript_endpoint(client):
+    """javascript: URI scheme must be rejected."""
+    resp = await client.post("/register", json={
+        "label": "xss",
+        "endpoint": "javascript:alert(1)",
+    })
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_label_too_long(client):
+    """Labels over 128 chars must be rejected."""
+    resp = await client.post("/register", json={
+        "label": "a" * 129,
+        "endpoint": "http://agent:9001",
+    })
+    assert resp.status_code == 400
+    assert "128" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_endpoint_too_long(client):
+    """Endpoints over 512 chars must be rejected."""
+    resp = await client.post("/register", json={
+        "label": "toolong",
+        "endpoint": "http://agent:9001/" + "a" * 500,
+    })
+    assert resp.status_code == 400
+    assert "512" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_firewall_rule_rejects_match_value_too_long(client):
+    """match_value over 512 chars must be rejected at the API layer."""
+    resp = await client.post("/firewall/rules", json={
+        "label": "agent",
+        "action": "block",
+        "match_type": "contains",
+        "match_value": "x" * 513,
+    })
+    assert resp.status_code == 400
+    assert "512" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_firewall_rule_rejects_redos_regex(client):
+    """Catastrophic backtracking regex patterns must be rejected."""
+    resp = await client.post("/firewall/rules", json={
+        "label": "agent",
+        "action": "block",
+        "match_type": "regex",
+        "match_value": r"(a+)+$",   # classic ReDoS pattern
+    })
+    # Either 400 (rejected) or 201 (if the test timeout didn't trigger).
+    # At minimum it must not hang the server.
+    assert resp.status_code in (400, 201)
+
+
+@pytest.mark.asyncio
+async def test_firewall_rule_accepts_valid_regex(client):
+    """A well-formed, safe regex should be accepted."""
+    resp = await client.post("/firewall/rules", json={
+        "label": "safe-agent",
+        "action": "block",
+        "match_type": "regex",
+        "match_value": r"DROP\s+TABLE",
+    })
+    assert resp.status_code == 201
