@@ -22,7 +22,9 @@ services:
       - DANS_AUTH=off
       - MONGODB_URI=${MONGODB_URI:-}
       - MONGODB_DB=${MONGODB_DB:-agentns}
-      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-}
+      # Route all agent calls through the DANS proxy so the firewall is always active.
+      # For local dev this is localhost:8200. For cloud set this to your public URL.
+      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-http://localhost:8200}
       - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}
     restart: unless-stopped
     healthcheck:

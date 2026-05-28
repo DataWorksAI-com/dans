@@ -49,10 +49,11 @@ services:
       # "agentgateway" generates /a2a/{namespace}/{label} for an external gateway.
       - AGENTNS_PROXY_MODE=${AGENTNS_PROXY_MODE:-dans}
 
-      # Proxy base URL — set to this instance's public URL when running behind nginx
+      # Proxy base URL — DANS returns proxy URLs from /resolve so ALL agent calls
+      # go through the firewall. Set to your public URL.
       # e.g. A2A_PROXY_ENDPOINTS=http://yourdomain.com/dans
-      # Leave blank to return direct agent URLs (no proxy)
-      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-}
+      # For local use the default http://localhost:8200 works fine.
+      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-http://localhost:8200}
 
       # Optional: fall back to a capability registry when label not found locally
       - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}

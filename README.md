@@ -127,7 +127,29 @@ endpoint = await client.resolve(agentns.Query(
 
 ### Prompt Firewall
 
-Every call proxied through DANS (`POST /proxy/{label}`) passes through a built-in firewall before reaching the target agent. Rules are API-driven — no YAML, no restarts.
+The firewall sits between callers and agents. When `A2A_PROXY_ENDPOINTS` is set (the default), every `/resolve` response returns a proxy URL — so all calls automatically go through the firewall without callers needing to know about it.
+
+```
+Caller                DANS                        Agent
+  │                     │                           │
+  │ POST /resolve        │                           │
+  │─────────────────────►│                           │
+  │                     │ returns proxy URL          │
+  │◄─────────────────────│ "endpoint":               │
+  │ http://dans:8200/    │   "http://dans:8200/      │
+  │   proxy/weather"     │    proxy/weather"         │
+  │                      │                           │
+  │ POST /proxy/weather  │                           │
+  │─────────────────────►│                           │
+  │                      ├── firewall check ──────►  │
+  │                      │   BLOCK → return 403      │
+  │                      │   PASS  → forward ──────► │
+  │                      │◄─────────────── response  │
+  │                      ├── response filter         │
+  │◄─────────────────────│   (redact / block)        │
+```
+
+The caller just uses whatever URL `/resolve` gave them. The proxy and firewall are invisible — no code change needed on the caller side.
 
 ```
 Your Agent
@@ -382,7 +404,7 @@ They're complementary. Use a registry for discovery, DANS for routing.
 | `AGENTNS_WORKERS` | `1` | Uvicorn worker count. **Keep at 1.** DANS stores firewall rules, registrations, and protocol_metadata inheritance state in memory. Multiple workers each have isolated memory — state changes on one worker are invisible to others. |
 | `AGENTNS_HEALTH_INTERVAL` | `30` | Background health sweep interval (seconds) |
 | `AGENTNS_PROXY_MODE` | `dans` | Proxy URL format. `dans` = `/proxy/{label}` served by this instance. `agentgateway` = `/a2a/{namespace}/{label}` for an external agentgateway. Use `dans` when self-hosting. |
-| `A2A_PROXY_ENDPOINTS` | *(empty)* | Public base URL of this DANS instance, e.g. `http://yourdomain.com/dans`. When set, `/resolve` returns proxy URLs so all agent calls route through the DANS firewall. |
+| `A2A_PROXY_ENDPOINTS` | `http://localhost:8200` | Public base URL of this DANS instance. When set, `/resolve` returns proxy URLs (`/proxy/{label}`) instead of direct agent URLs. **This is what puts the firewall in front of every agent call.** Callers use the resolved URL directly — they don't need to know about the proxy. Set to your public URL in cloud: `http://yourserver:8200`. |
 | `MONGODB_URI` | *(empty)* | MongoDB connection string. In-memory if absent — resets on restart. |
 | `MONGODB_DB` | `agentns` | MongoDB database name |
 | `DANS_AUTH` | `off` | `"on"` to require `X-API-Key` on write endpoints |

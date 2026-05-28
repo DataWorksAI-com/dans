@@ -55,7 +55,11 @@ MONGODB_DB=${MONGODB_DB:-agentns}
 DANS_AUTH=${DANS_AUTH:-off}
 AGENTNS_WORKERS=1
 AGENTNS_PROXY_MODE=dans
-A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-}
+# A2A_PROXY_ENDPOINTS tells DANS to return proxy URLs from /resolve.
+# This puts the firewall in front of every agent call.
+# Defaults to http://SERVER:8200 — override with A2A_PROXY_ENDPOINTS env var
+# if you're behind nginx (e.g. http://yourdomain.com/dans).
+A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-http://${SERVER}:8200}
 ENV
 echo "Created .env"
 fi

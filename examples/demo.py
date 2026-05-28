@@ -87,6 +87,14 @@ check("Resolved",            s == 200,                          d.get("endpoint"
 check("Protocol negotiated", d.get("protocol") == "a2a",        d.get("protocol"))
 check("Negotiated by",       d.get("negotiated_by") != "",      d.get("negotiated_by"))
 check("Metadata returned",   bool(d.get("protocol_metadata")),  str(d.get("protocol_metadata", {}))[:60])
+
+# When A2A_PROXY_ENDPOINTS is set, /resolve returns a proxy URL — not the direct
+# agent URL. This means ALL calls made with the resolved endpoint automatically
+# go through the DANS firewall. Callers don't need to know about the firewall.
+via_proxy = d.get("via_proxy", False)
+check("Firewall in path (via_proxy)", via_proxy,
+      "resolve returned proxy URL — firewall active" if via_proxy
+      else "resolve returned direct URL — set A2A_PROXY_ENDPOINTS to enable firewall")
 endpoint = d.get("endpoint", AGENT_URL)
 print()
 
