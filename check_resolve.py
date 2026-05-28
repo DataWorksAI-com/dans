@@ -1,7 +1,13 @@
-"""Quick check: call DANS resolve for MBTA agents and show negotiation results."""
+"""
+Quick check: resolve agents and print protocol negotiation results.
+
+Usage:
+    python check_resolve.py                          # local
+    python check_resolve.py http://your-server:8200  # cloud
+"""
 import urllib.request, json, sys
 
-DANS = sys.argv[1] if len(sys.argv) > 1 else "http://97.107.132.213/dans"
+DANS = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8200"
 AGENTS = [
     "urn:agents.dataworksai.com:mbta-transit-ci:alerts",
     "urn:agents.dataworksai.com:mbta-transit-ci:planner",

@@ -419,22 +419,49 @@ curl -X POST http://localhost:8200/register \
 
 ---
 
-## Deploy to a server
+## Local → Cloud workflow
 
-Use the included deploy script to bootstrap DANS on any Linux server:
+DANS works identically local and in cloud. Test locally first, then deploy the same way.
+
+### Step 1 — Test locally
+
+```bash
+git clone https://github.com/DataWorksAI-com/dans.git
+cd dans
+docker compose up -d --build
+
+# Verify everything works
+python verify_security.py                    # security checks
+python verify_protocol_intelligence.py       # protocol negotiation
+python check_resolve.py                      # resolve test agents
+```
+
+All scripts default to `http://localhost:8200`.
+
+### Step 2 — Deploy to cloud
 
 ```bash
 export DEPLOY_HOST=your-server-ip
-export MONGODB_URI="mongodb+srv://..."   # optional
+export MONGODB_URI="mongodb+srv://..."   # optional — for persistence
 bash scripts/deploy.sh
 ```
 
-The script:
+The deploy script:
 1. Installs Docker if missing
 2. Copies all source files to the server
-3. Builds the image
+3. Builds the image on the server
 4. Starts the container
 5. Health-checks and prints the URL
+
+### Step 3 — Run the same tests against cloud
+
+```bash
+python verify_security.py            http://your-server:8200
+python verify_protocol_intelligence.py http://your-server:8200
+python check_resolve.py              http://your-server:8200
+```
+
+Same tests, same results — your local and cloud instances behave identically.
 
 ---
 
