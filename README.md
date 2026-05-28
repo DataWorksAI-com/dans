@@ -14,52 +14,40 @@ In a multi-agent system, Agent B needs to call Agent A. Without DANS, B hardcode
 ## Quickstart
 
 ```bash
-# 1. Clone and start
+# 1. Clone and start DANS
 git clone https://github.com/DataWorksAI-com/dans.git
 cd dans
-docker compose -f docker-compose.dans.yml up -d --build
+docker compose up -d --build
 ```
 
-DANS is now running at `http://localhost:8200`. Open it in your browser to see the dashboard.
+DANS is running at `http://localhost:8200`. Open it in your browser to see the dashboard.
 
 ```bash
-# 2. Register your agent
-curl -X POST http://localhost:8200/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "label":    "my-agent",
-    "endpoint": "http://your-server:9001"
-  }'
-```
-
-```json
-{
-  "status":     "registered",
-  "label":      "my-agent",
-  "agent_name": "urn:agentns.local:public:my-agent"
-}
+# 2. Start the included echo agent (a real runnable test agent)
+python examples/echo_agent.py
 ```
 
 ```bash
-# 3. Resolve from anywhere
-curl -X POST http://localhost:8200/resolve \
-  -H "Content-Type: application/json" \
-  -d '{"agent_name": "my-agent"}'
+# 3. Run the full demo — register, resolve, call, firewall, failover
+python examples/demo.py
 ```
 
-```json
-{
-  "endpoint":    "http://your-server:9001",
-  "protocol":    "http",
-  "ttl":         300,
-  "selected_by": "only_available"
-}
+```
+[PASS] DANS responding  →  3.1.0
+[PASS] Registered       →  registered
+[PASS] Resolved         →  http://localhost:9001
+[PASS] Protocol negotiated  →  a2a
+[PASS] Direct call works    →  Echo: hello DANS
+[PASS] Proxy call works     →  Echo: hello via proxy
+[PASS] Attack blocked       →  rule:abc123
+[PASS] Legit query passes
+[PASS] Multi-region metadata inherited
+...
+Results: 18/18 passed — ALL GOOD
 ```
 
-```bash
-# 4. See all registered agents
-curl http://localhost:8200/health
-```
+The echo agent (`examples/echo_agent.py`) is a minimal A2A-compatible HTTP server
+included specifically for local testing — no external services needed.
 
 ---
 
@@ -430,13 +418,19 @@ git clone https://github.com/DataWorksAI-com/dans.git
 cd dans
 docker compose up -d --build
 
-# Verify everything works
-python verify_security.py                    # security checks
-python verify_protocol_intelligence.py       # protocol negotiation
-python check_resolve.py                      # resolve test agents
+# Terminal 2: start the included test agent
+python examples/echo_agent.py
+
+# Terminal 3: run the full demo
+python examples/demo.py
+
+# Additional verification
+python verify_security.py                    # security hardening checks
+python verify_protocol_intelligence.py       # protocol negotiation checks
 ```
 
-All scripts default to `http://localhost:8200`.
+All scripts default to `http://localhost:8200`. The echo agent is a real A2A-compatible
+HTTP server — no external services or mock patches needed.
 
 ### Step 2 — Deploy to cloud
 
@@ -456,12 +450,12 @@ The deploy script:
 ### Step 3 — Run the same tests against cloud
 
 ```bash
+python examples/demo.py              http://your-server:8200
 python verify_security.py            http://your-server:8200
 python verify_protocol_intelligence.py http://your-server:8200
-python check_resolve.py              http://your-server:8200
 ```
 
-Same tests, same results — your local and cloud instances behave identically.
+Same tests, same results. Every script accepts the DANS URL as its first argument.
 
 ---
 
@@ -485,8 +479,10 @@ dans/
 │   ├── tenant.py           ← Namespace ownership (used when DANS_AUTH=on)
 │   └── __init__.py         ← Public SDK surface
 ├── examples/
-│   ├── quickstart_requester.py   ← Resolve and call an agent
-│   ├── quickstart_target.py      ← Register your agent at startup
+│   ├── echo_agent.py             ← Minimal A2A agent for local testing (run this first)
+│   ├── demo.py                   ← Full demo: register, resolve, call, firewall, failover
+│   ├── quickstart_requester.py   ← Resolve and call an agent (SDK version)
+│   ├── quickstart_target.py      ← Register your agent at startup (SDK version)
 │   └── custom_registry_adapter.py
 ├── tests/
 │   └── test_api.py         ← Tests covering core + firewall endpoints
