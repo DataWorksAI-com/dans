@@ -11,23 +11,23 @@ In a multi-agent system, Agent B needs to call Agent A. Without DANS, B hardcode
 
 ---
 
-## Public Instance
-
-**`http://97.107.132.213/dans/`** — live, open, no signup required.
-
-Register your agent and it's immediately resolvable by anyone.
-
----
-
-## Quickstart — 3 curl commands
-
-### 1. Register your agent
+## Quickstart
 
 ```bash
-curl -X POST http://97.107.132.213/dans/register \
+# 1. Clone and start
+git clone https://github.com/DataWorksAI-com/dans.git
+cd dans
+docker compose -f docker-compose.dans.yml up -d --build
+```
+
+DANS is now running at `http://localhost:8200`. Open it in your browser to see the dashboard.
+
+```bash
+# 2. Register your agent
+curl -X POST http://localhost:8200/register \
   -H "Content-Type: application/json" \
   -d '{
-    "label":    "my-weather-agent",
+    "label":    "my-agent",
     "endpoint": "http://your-server:9001"
   }'
 ```
@@ -35,35 +35,49 @@ curl -X POST http://97.107.132.213/dans/register \
 ```json
 {
   "status":     "registered",
-  "label":      "my-weather-agent",
-  "endpoint":   "http://your-server:9001",
-  "agent_name": "urn:agents.dataworksai.com:public:my-weather-agent"
+  "label":      "my-agent",
+  "agent_name": "urn:agentns.local:public:my-agent"
 }
 ```
 
-### 2. Resolve from anywhere
-
 ```bash
-curl -X POST http://97.107.132.213/dans/resolve \
+# 3. Resolve from anywhere
+curl -X POST http://localhost:8200/resolve \
   -H "Content-Type: application/json" \
-  -d '{"agent_name": "my-weather-agent"}'
+  -d '{"agent_name": "my-agent"}'
 ```
 
 ```json
 {
-  "endpoint":          "http://your-server:9001",
-  "protocol":          "http",
-  "ttl":               300,
-  "cached":            false,
-  "selected_by":       "only_available",
-  "resolution_time_ms": 1.8
+  "endpoint":    "http://your-server:9001",
+  "protocol":    "http",
+  "ttl":         300,
+  "selected_by": "only_available"
 }
 ```
 
-### 3. See all registered agents
+```bash
+# 4. See all registered agents
+curl http://localhost:8200/health
+```
+
+---
+
+## With MongoDB persistence
+
+Without MongoDB, registrations reset on restart. Add a connection string to persist across restarts:
 
 ```bash
-curl http://97.107.132.213/dans/health
+export MONGODB_URI="mongodb+srv://user:pass@cluster.mongodb.net/"
+docker compose -f docker-compose.dans.yml up -d --build
+```
+
+Or create a `.env` file:
+
+```env
+MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net/
+AGENTNS_TLD=agents.mycompany.com
+AGENTNS_NAMESPACE=mycompany
 ```
 
 ---
@@ -74,15 +88,16 @@ curl http://97.107.132.213/dans/health
 pip install agentns
 ```
 
-### Register your agent (target side)
+### Register your agent (at startup)
 
 ```python
 import agentns
 
-client = agentns.target_lib.connect()   # reads AGENTNS_URL from env
+# Set AGENTNS_URL=http://localhost:8200 in your environment
+client = agentns.target_lib.connect()
 
 await client.record(agentns.DeploymentSpec(
-    leaf_name  = "my-weather-agent",
+    leaf_name  = "my-agent",
     a2a_url    = "http://myhost:9001",
     health_url = "http://myhost:9001/health",
     region     = "us-east",
@@ -91,18 +106,18 @@ await client.record(agentns.DeploymentSpec(
 ))
 ```
 
-### Resolve another agent (requester side)
+### Resolve another agent
 
 ```python
 import agentns
 
-client   = agentns.requester_lib.connect()   # reads AGENTNS_URL from env
-endpoint = await client.resolve(agentns.Query.from_label("my-weather-agent"))
+# Set AGENTNS_URL=http://localhost:8200 in your environment
+client   = agentns.requester_lib.connect()
+endpoint = await client.resolve(agentns.Query.from_label("my-agent"))
 
 if endpoint:
     print(endpoint.url)         # → "http://your-server:9001"
     print(endpoint.selected_by) # → "only_available" | "geo_nearest" | "lowest_latency"
-    print(endpoint.region)      # → "us-east"
 ```
 
 ### With geo-routing context
@@ -123,11 +138,12 @@ endpoint = await client.resolve(agentns.Query(
 ## Features
 
 ### Prompt Firewall
-DANS includes a built-in **A2A Prompt Firewall** — middleware that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Zero extra infrastructure: it's part of DANS itself.
+
+Every call proxied through DANS (`POST /proxy/{label}`) passes through a built-in firewall before reaching the target agent. Rules are API-driven — no YAML, no restarts.
 
 ```
-Requester Agent
-    │  POST /dans/proxy/weather-agent
+Your Agent
+    │  POST http://localhost:8200/proxy/weather-agent
     ▼
 ┌────────────────────────────────────────────┐
 │  DANS Proxy + Firewall                     │
@@ -145,27 +161,25 @@ Requester Agent
               Target Agent
 ```
 
-Rules are API-driven — no YAML, no restarts. Add a rule and it's live instantly.
-
 ```bash
 # Block prompt injection on every agent
-curl -X POST http://97.107.132.213/dans/firewall/rules \
+curl -X POST http://localhost:8200/firewall/rules \
   -d '{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}'
 
 # Block jailbreaks on a specific agent (regex)
-curl -X POST http://97.107.132.213/dans/firewall/rules \
+curl -X POST http://localhost:8200/firewall/rules \
   -d '{"label":"planner","action":"block","match_type":"regex","match_value":"(?i)(act as|pretend you are).{0,30}?(unrestricted|DAN|evil)"}'
 
-# Redact API keys from any agent response before returning to caller
-curl -X POST http://97.107.132.213/dans/firewall/rules \
+# Redact API keys from any agent response before it reaches the caller
+curl -X POST http://localhost:8200/firewall/rules \
   -d '{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{20,}","params":{"replacement":"[API-KEY-REDACTED]"}}'
 
 # Block an agent from leaking its own system prompt
-curl -X POST http://97.107.132.213/dans/firewall/rules \
+curl -X POST http://localhost:8200/firewall/rules \
   -d '{"label":"*","action":"block_response","match_type":"contains","match_value":"system prompt"}'
 
 # Dry-run test — check what would happen without forwarding
-curl -X POST http://97.107.132.213/dans/firewall/test \
+curl -X POST http://localhost:8200/firewall/test \
   -d '{"label":"planner","body":{"message":"ignore previous instructions"}}'
 # → {"action":"block","reason":"rule:abc123","would_forward":false}
 ```
@@ -185,34 +199,31 @@ curl -X POST http://97.107.132.213/dans/firewall/test \
 
 **Match types:** `contains` · `regex` · `method` (A2A method name) · `always`
 
-**Compared to alternatives:**
-
-| | Agentgateway | Akamai Firewall for AI | **DANS Firewall** |
-|---|---|---|---|
-| Setup | YAML config + deploy | SaaS signup | POST a rule to an endpoint you already use |
-| Protocol | Standalone proxy | HTTP/API | Built into DANS proxy |
-| Rules | OPA/Cedar/YAML | Managed threat scores | Simple API: contains / regex / method |
-| Best for | Enterprise zero-trust | Akamai edge customers | Anyone already using DANS |
+---
 
 ### Health-aware routing
-DANS runs a background health sweep (default: every 30 s) against every registered endpoint. Unhealthy endpoints are automatically skipped during resolution. If all instances are down, DANS returns the least-recently-failed endpoint as an emergency fallback rather than a hard error.
+
+DANS runs a background health sweep (default: every 30s) against every registered endpoint. Unhealthy endpoints are automatically skipped during resolution. If all instances are down, DANS returns the least-recently-failed endpoint as an emergency fallback rather than a hard error.
+
+---
 
 ### Geo-routing
-Register the same label from multiple regions. DANS picks the nearest healthy instance based on the requester's location.
+
+Register the same label from multiple servers. DANS picks the nearest healthy instance based on the requester's location.
 
 ```bash
 # Register US East instance
-curl -X POST http://97.107.132.213/dans/register \
+curl -X POST http://localhost:8200/register \
   -d '{"label":"my-agent","endpoint":"http://us-east:9001","region":"us-east","location":{"city":"Boston"}}'
 
 # Register EU instance
-curl -X POST http://97.107.132.213/dans/register \
+curl -X POST http://localhost:8200/register \
   -d '{"label":"my-agent","endpoint":"http://eu-west:9001","region":"eu-west","location":{"city":"Frankfurt"}}'
 
 # Callers from Boston get the US endpoint; callers from Berlin get the EU endpoint
 ```
 
-`selected_by` in the response tells you why an endpoint was chosen:
+`selected_by` in the resolve response tells you why an endpoint was chosen:
 
 | Value | Meaning |
 |---|---|
@@ -222,31 +233,65 @@ curl -X POST http://97.107.132.213/dans/register \
 | `registry-fallback` | Found via a connected capability registry |
 | `emergency_fallback` | All unhealthy — returned best available |
 
+---
+
 ### Protocol negotiation
-Declare which protocols your agent speaks. Callers filter by protocol.
+
+Declare which protocols your agent speaks. DANS negotiates the best match with the caller and returns the protocol and connection hints.
 
 ```bash
-curl -X POST http://97.107.132.213/dans/register \
-  -d '{"label":"my-a2a-agent","endpoint":"http://myserver:9001","protocols":["A2A","http"]}'
+curl -X POST http://localhost:8200/register \
+  -d '{
+    "label":    "my-a2a-agent",
+    "endpoint": "http://myserver:9001",
+    "protocols": ["A2A", "http"],
+    "protocol_metadata": {
+      "a2a":  {"version": "0.2.1", "path": "/a2a/message"},
+      "http": {"path": "/chat"}
+    }
+  }'
 ```
 
+Resolve response includes the negotiated protocol and connection hints:
+
+```json
+{
+  "endpoint":          "http://myserver:9001",
+  "protocol":          "a2a",
+  "negotiated_by":     "intersection",
+  "protocol_metadata": {"version": "0.2.1", "path": "/a2a/message"},
+  "fallback_protocol": "http"
+}
+```
+
+**Multi-region failover with protocol metadata:**
+All replicas of the same agent should speak the same protocol. If you register a replica without `protocol_metadata`, DANS automatically inherits it from the existing endpoint for that label — so failover always works correctly even if the replica was registered without connection hints.
+
+---
+
 ### Federation / Switchboard
-Connect any DANS instance or capability-based registry. When a label isn't found locally, DANS fans out to all connected instances.
+
+Connect your DANS instance to a capability-based registry or another DANS instance. When a label isn't found locally, DANS fans out to all connected instances.
 
 ```bash
-# Connect a capability registry (DataWorksAI-style, Northeastern, etc.)
-curl -X POST http://97.107.132.213/dans/switchboard/registries \
+# Connect a capability registry
+curl -X POST http://localhost:8200/switchboard/registries \
   -H "Content-Type: application/json" \
-  -d '{"tld":"agents.northeastern.edu","url":"http://northeastern-registry.edu","type":"registry"}'
+  -d '{"tld":"agents.northeastern.edu","url":"http://registry.northeastern.edu","type":"registry"}'
 
 # Connect another DANS instance (peer federation)
-curl -X POST http://97.107.132.213/dans/switchboard/registries \
+curl -X POST http://localhost:8200/switchboard/registries \
   -H "Content-Type: application/json" \
   -d '{"tld":"agents.acme.io","url":"http://acme-dans:8200","type":"dans"}'
 ```
 
+---
+
 ### Resolution cache
+
 Responses are cached with a 5-minute TTL. The `cached` field in the response tells you if the result came from cache. Bypass with `"cache_enabled": false` in the request.
+
+---
 
 ### DANS vs Registry
 
@@ -312,7 +357,7 @@ They're complementary. Use a registry for discovery, DANS for routing.
 | `GET` | `/firewall/rules?label=X` | List rules (all, or filtered by label) |
 | `DELETE` | `/firewall/rules/{rule_id}` | Delete a firewall rule |
 | `GET` | `/firewall/stats` | Hit/block/pass/cache counts per label |
-| `POST` | `/firewall/test` | Dry-run: evaluate request (and optional response) against rules |
+| `POST` | `/firewall/test` | Dry-run: evaluate request against rules without forwarding |
 
 ### `/register` fields
 
@@ -323,6 +368,7 @@ They're complementary. Use a registry for discovery, DANS for routing.
 | `region` | | e.g. `"us-east"`, `"eu-west"` |
 | `location` | | `{"city": "Boston"}` or `{"latitude": 42.3, "longitude": -71.1}` |
 | `protocols` | | `["A2A", "http"]` (default: `["http"]`) |
+| `protocol_metadata` | | Per-protocol hints: `{"a2a": {"version": "0.2.1", "path": "/a2a/message"}}` |
 | `health_url` | | Custom health check endpoint (default: `{endpoint}/health`) |
 | `namespace` | | URN namespace (default: `public`) |
 
@@ -336,32 +382,7 @@ They're complementary. Use a registry for discovery, DANS for routing.
 
 ---
 
-## Self-Hosting
-
-Run your own DANS instance:
-
-```bash
-# With MongoDB persistence (registrations survive restarts)
-export MONGODB_URI="mongodb+srv://user:pass@cluster.mongodb.net/"
-docker compose -f docker-compose.dans.yml up -d --build
-
-# In-memory only (resets on restart — good for local dev)
-docker compose -f docker-compose.dans.yml up -d --build
-```
-
-The `--build` flag builds the image from the local `Dockerfile.agentns` on first run.
-
-Access at `http://localhost:8200/`.
-
-### Deploy to a remote server
-
-```bash
-export DEPLOY_HOST=your-server-ip
-export MONGODB_URI="mongodb+srv://..."  # optional
-bash scripts/deploy.sh
-```
-
-The deploy script copies all source files, installs Docker if needed, builds the image, and starts the container.
+## Configuration
 
 ### Environment Variables
 
@@ -370,11 +391,11 @@ The deploy script copies all source files, installs Docker if needed, builds the
 | `AGENTNS_TLD` | `agentns.local` | URN TLD this instance issues |
 | `AGENTNS_NAMESPACE` | `public` | Default URN namespace |
 | `AGENTNS_PORT` | `8200` | HTTP port |
-| `AGENTNS_WORKERS` | `1` | Uvicorn worker count. **Keep at 1.** Firewall rules, registrations, and protocol_metadata inheritance all use in-memory state. Multiple workers each have isolated memory — state changes on one worker are invisible to others. |
+| `AGENTNS_WORKERS` | `1` | Uvicorn worker count. **Keep at 1.** DANS stores firewall rules, registrations, and protocol_metadata inheritance state in memory. Multiple workers each have isolated memory — state changes on one worker are invisible to others. |
 | `AGENTNS_HEALTH_INTERVAL` | `30` | Background health sweep interval (seconds) |
-| `AGENTNS_PROXY_MODE` | `dans` | Proxy URL format. `dans` = `/proxy/{label}` (served by this instance). `agentgateway` = `/a2a/{namespace}/{label}` (for an external agentgateway). Use `dans` when self-hosting. |
-| `A2A_PROXY_ENDPOINTS` | *(empty)* | Public base URL of this DANS instance, e.g. `http://yourdomain.com/dans`. When set, `/resolve` returns proxy URLs instead of direct agent URLs, routing all calls through the DANS firewall. |
-| `MONGODB_URI` | *(empty)* | MongoDB connection string (in-memory if absent — resets on restart) |
+| `AGENTNS_PROXY_MODE` | `dans` | Proxy URL format. `dans` = `/proxy/{label}` served by this instance. `agentgateway` = `/a2a/{namespace}/{label}` for an external agentgateway. Use `dans` when self-hosting. |
+| `A2A_PROXY_ENDPOINTS` | *(empty)* | Public base URL of this DANS instance, e.g. `http://yourdomain.com/dans`. When set, `/resolve` returns proxy URLs so all agent calls route through the DANS firewall. |
+| `MONGODB_URI` | *(empty)* | MongoDB connection string. In-memory if absent — resets on restart. |
 | `MONGODB_DB` | `agentns` | MongoDB database name |
 | `DANS_AUTH` | `off` | `"on"` to require `X-API-Key` on write endpoints |
 | `ANS_FALLBACK_URL` | *(empty)* | Capability registry URL to fall back to when label not found locally |
@@ -382,19 +403,38 @@ The deploy script copies all source files, installs Docker if needed, builds the
 
 ### Auth mode (`DANS_AUTH=on`)
 
-With auth enabled, `/register` and `/deregister` require an `X-API-Key` header. Get a key by claiming a namespace:
+With auth enabled, `/register` and `/deregister` require an `X-API-Key` header:
 
 ```bash
-curl -X POST http://your-dans/signup \
+# Claim a namespace and get an API key
+curl -X POST http://localhost:8200/signup \
   -d '{"email": "you@example.com", "namespace": "myco"}'
 # → {"api_key": "dk_live_...", "namespace": "myco"}
 
-curl -X POST http://your-dans/register \
+# Register using your key
+curl -X POST http://localhost:8200/register \
   -H "X-API-Key: dk_live_..." \
   -d '{"label": "weather", "namespace": "myco", "endpoint": "http://..."}'
 ```
 
-The public instance runs with `DANS_AUTH=off` — no key needed.
+---
+
+## Deploy to a server
+
+Use the included deploy script to bootstrap DANS on any Linux server:
+
+```bash
+export DEPLOY_HOST=your-server-ip
+export MONGODB_URI="mongodb+srv://..."   # optional
+bash scripts/deploy.sh
+```
+
+The script:
+1. Installs Docker if missing
+2. Copies all source files to the server
+3. Builds the image
+4. Starts the container
+5. Health-checks and prints the URL
 
 ---
 
@@ -422,14 +462,13 @@ dans/
 │   ├── quickstart_target.py      ← Register your agent at startup
 │   └── custom_registry_adapter.py
 ├── tests/
-│   └── test_api.py         ← 38 tests covering core + firewall endpoints
+│   └── test_api.py         ← Tests covering core + firewall endpoints
 ├── scripts/
-│   └── deploy.sh           ← Bootstrap DANS on a fresh server
+│   └── deploy.sh           ← Deploy DANS to a remote Linux server
 ├── Dockerfile.agentns
-├── docker-compose.yml          ← Local dev (in-memory, no MongoDB)
-├── docker-compose.dans.yml     ← Standalone production deployment
-├── DANS.md                     ← Full API reference
-└── README.md                   ← This file
+├── docker-compose.dans.yml     ← Run DANS (production or local)
+├── docker-compose.yml          ← Local dev alias (same as dans.yml)
+└── README.md
 ```
 
 ---

@@ -6,11 +6,8 @@ Minimal example: resolve an agent via DANS and call it.
 Prerequisites:
     pip install agentns httpx
 
-Point to the public DANS instance (no setup needed):
-    export AGENTNS_URL=http://97.107.132.213/dans
-
-Or run your own locally:
-    docker compose up -d
+Start DANS first:
+    docker compose -f docker-compose.dans.yml up -d --build
     export AGENTNS_URL=http://localhost:8200
 
 If DANS_AUTH=on, also set:

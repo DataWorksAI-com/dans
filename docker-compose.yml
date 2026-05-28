@@ -1,5 +1,11 @@
-# docker-compose.yml — Local development (in-memory, no MongoDB required)
-# For a persistent deployment use docker-compose.dans.yml
+# docker-compose.yml — Local development alias
+#
+# Quick start:
+#   docker compose up -d --build
+#   curl http://localhost:8200/health
+#
+# Identical to docker-compose.dans.yml with in-memory defaults (no MongoDB).
+# For persistent deployments set MONGODB_URI or use docker-compose.dans.yml directly.
 
 services:
   agentns:
@@ -10,8 +16,18 @@ services:
       - "8200:8200"
     environment:
       - AGENTNS_TLD=agentns.local
-      - AGENTNS_NAMESPACE=default
+      - AGENTNS_NAMESPACE=public
+      - AGENTNS_WORKERS=1
+      - AGENTNS_PROXY_MODE=dans
       - DANS_AUTH=off
-      # Uncomment to wire a fallback registry:
-      # - ANS_FALLBACK_URL=http://your-registry:6900
+      - MONGODB_URI=${MONGODB_URI:-}
+      - MONGODB_DB=${MONGODB_DB:-agentns}
+      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-}
+      - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
