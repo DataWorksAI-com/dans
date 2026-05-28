@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc curl && rm -rf /var/lib/apt/lists/*
 
 COPY agentns/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -12,9 +12,19 @@ COPY agentns/ ./agentns/
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# NOTE: Keep AGENTNS_WORKERS=1 (default).
+# DANS stores firewall rules, registrations, and health state in memory.
+# Multiple workers each have isolated memory — rules added to one worker
+# won't exist in another, and protocol_metadata inheritance breaks because
+# registrations land on different workers.
+# Only increase workers if you use MongoDB for persistence AND you understand
+# that firewall rules added at runtime will not be shared between workers.
+ENV AGENTNS_WORKERS=1
+
 EXPOSE 8200
 
-CMD ["uvicorn", "agentns.server:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8200", \
-     "--workers", "2"]
+# Use shell form so AGENTNS_WORKERS env var is expanded at container start
+CMD uvicorn agentns.server:app \
+    --host 0.0.0.0 \
+    --port 8200 \
+    --workers ${AGENTNS_WORKERS}

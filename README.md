@@ -338,18 +338,30 @@ They're complementary. Use a registry for discovery, DANS for routing.
 
 ## Self-Hosting
 
-Run your own DANS instance with one command:
+Run your own DANS instance:
 
 ```bash
 # With MongoDB persistence (registrations survive restarts)
 export MONGODB_URI="mongodb+srv://user:pass@cluster.mongodb.net/"
-docker compose -f docker-compose.dans.yml up -d
+docker compose -f docker-compose.dans.yml up -d --build
 
 # In-memory only (resets on restart — good for local dev)
-docker compose up -d
+docker compose -f docker-compose.dans.yml up -d --build
 ```
 
+The `--build` flag builds the image from the local `Dockerfile.agentns` on first run.
+
 Access at `http://localhost:8200/`.
+
+### Deploy to a remote server
+
+```bash
+export DEPLOY_HOST=your-server-ip
+export MONGODB_URI="mongodb+srv://..."  # optional
+bash scripts/deploy.sh
+```
+
+The deploy script copies all source files, installs Docker if needed, builds the image, and starts the container.
 
 ### Environment Variables
 
@@ -358,9 +370,11 @@ Access at `http://localhost:8200/`.
 | `AGENTNS_TLD` | `agentns.local` | URN TLD this instance issues |
 | `AGENTNS_NAMESPACE` | `public` | Default URN namespace |
 | `AGENTNS_PORT` | `8200` | HTTP port |
-| `AGENTNS_WORKERS` | `1` | Uvicorn worker count (keep at 1 — firewall state is in-memory) |
+| `AGENTNS_WORKERS` | `1` | Uvicorn worker count. **Keep at 1.** Firewall rules, registrations, and protocol_metadata inheritance all use in-memory state. Multiple workers each have isolated memory — state changes on one worker are invisible to others. |
 | `AGENTNS_HEALTH_INTERVAL` | `30` | Background health sweep interval (seconds) |
-| `MONGODB_URI` | *(empty)* | MongoDB connection string (in-memory if absent) |
+| `AGENTNS_PROXY_MODE` | `dans` | Proxy URL format. `dans` = `/proxy/{label}` (served by this instance). `agentgateway` = `/a2a/{namespace}/{label}` (for an external agentgateway). Use `dans` when self-hosting. |
+| `A2A_PROXY_ENDPOINTS` | *(empty)* | Public base URL of this DANS instance, e.g. `http://yourdomain.com/dans`. When set, `/resolve` returns proxy URLs instead of direct agent URLs, routing all calls through the DANS firewall. |
+| `MONGODB_URI` | *(empty)* | MongoDB connection string (in-memory if absent — resets on restart) |
 | `MONGODB_DB` | `agentns` | MongoDB database name |
 | `DANS_AUTH` | `off` | `"on"` to require `X-API-Key` on write endpoints |
 | `ANS_FALLBACK_URL` | *(empty)* | Capability registry URL to fall back to when label not found locally |

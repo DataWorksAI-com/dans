@@ -23,7 +23,9 @@
 
 services:
   agentns:
-    image: agentns:live
+    build:
+      context: .
+      dockerfile: Dockerfile.agentns
     ports:
       - "8200:8200"
     environment:
@@ -33,17 +35,26 @@ services:
 
       # Persistence — omit MONGODB_URI for in-memory only (resets on restart)
       - MONGODB_URI=${MONGODB_URI:-}
-      - MONGODB_DB=${MONGODB_DB:-ans_public}
+      - MONGODB_DB=${MONGODB_DB:-agentns}
 
       # Auth — "off" for open service (default); "on" to require X-API-Key on writes
       - DANS_AUTH=${DANS_AUTH:-off}
 
-      # Performance
-      - AGENTNS_WORKERS=${AGENTNS_WORKERS:-2}
+      # Workers — MUST stay 1 for in-memory state (firewall rules + registry).
+      # See Dockerfile for full explanation.
+      - AGENTNS_WORKERS=${AGENTNS_WORKERS:-1}
       - AGENTNS_HEALTH_INTERVAL=${AGENTNS_HEALTH_INTERVAL:-30}
 
+      # Proxy mode — "dans" uses /proxy/{label} URLs served by this instance.
+      # "agentgateway" generates /a2a/{namespace}/{label} for an external gateway.
+      - AGENTNS_PROXY_MODE=${AGENTNS_PROXY_MODE:-dans}
+
+      # Proxy base URL — set to this instance's public URL when running behind nginx
+      # e.g. A2A_PROXY_ENDPOINTS=http://yourdomain.com/dans
+      # Leave blank to return direct agent URLs (no proxy)
+      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-}
+
       # Optional: fall back to a capability registry when label not found locally
-      # Leave blank for fully standalone mode
       - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}
 
       # Optional: federation — connect to other DANS instances
