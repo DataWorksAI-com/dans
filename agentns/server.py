@@ -1246,6 +1246,22 @@ async def register(request: Request, body: dict):
     #            "slim": {"identity": "mbta/transit-ci/planner"}}
     protocol_metadata  = body.get("protocol_metadata") or {}
 
+    # If this new endpoint has no protocol_metadata, inherit from an existing
+    # endpoint of the same label that does. All instances of the same agent
+    # run the same protocol stack, so metadata is shared across endpoints.
+    # Without this, failover to a replica registered without metadata silently
+    # breaks callers that depend on path/format hints (e.g. Google A2A format).
+    if not protocol_metadata:
+        _existing = _registry.get(label, [])
+        for _ep in _existing:
+            if _ep.get("protocol_metadata"):
+                protocol_metadata = _ep["protocol_metadata"]
+                logger.info(
+                    f"register '{label}': no protocol_metadata supplied for {endpoint} — "
+                    f"inherited from existing endpoint {_ep['endpoint']}"
+                )
+                break
+
     # ── namespace auth (when DANS_AUTH=on) ───────────────────────────────────
     if DANS_AUTH == "on":
         raw_key = request.headers.get("X-API-Key", "").strip()
