@@ -17,7 +17,12 @@ Usage:
 """
 
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# Make startup banner safe on Windows consoles (cp1252) and everywhere else.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PORT   = 9001
 LABEL  = "echo-agent"
@@ -87,10 +92,10 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Echo agent running on http://localhost:{PORT}")
-    print(f"  GET  /health              → health check")
-    print(f"  POST /                    → A2A message/send")
-    print(f"  POST /chat                → custom HTTP format")
-    print(f"  GET  /.well-known/agent.json → agent card")
+    print(f"  GET  /health                 -> health check")
+    print(f"  POST /                       -> A2A message/send")
+    print(f"  POST /chat                   -> custom HTTP format")
+    print(f"  GET  /.well-known/agent.json -> agent card")
     print(f"\nPress Ctrl+C to stop.\n")
     try:
         server.serve_forever()

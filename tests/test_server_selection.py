@@ -70,7 +70,8 @@ def test_unhealthy_included_flag():
 
 
 def test_select_protocol_preferred():
-    assert select_protocol(["http", "A2A"], ["A2A"]) == "A2A"
+    # select_protocol normalises to lowercase for consistent downstream handling
+    assert select_protocol(["http", "A2A"], ["A2A"]) == "a2a"
 
 
 def test_select_protocol_fallback():

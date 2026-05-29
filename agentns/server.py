@@ -105,9 +105,12 @@ def _limit(rate: str):
         return _limiter.limit(rate)
     return lambda f: f
 
+# ── version — single source of truth, used in health, banner, signup, Swagger ──
+VERSION = "3.1.0"
+
 # ── config from env ────────────────────────────────────────────────────────────
 PORT             = int(os.getenv("AGENTNS_PORT",            "8200"))
-DEFAULT_NS       = os.getenv("AGENTNS_NAMESPACE",           "agents.local")
+DEFAULT_NS       = os.getenv("AGENTNS_NAMESPACE",           "public")
 DEFAULT_TLD      = os.getenv("AGENTNS_TLD",                 "agentns.local")
 HEALTH_INTERVAL  = int(os.getenv("AGENTNS_HEALTH_INTERVAL", "30"))
 MONGODB_URI      = os.getenv("MONGODB_URI",                 "")
@@ -155,7 +158,10 @@ DANS_AUTH = os.getenv("DANS_AUTH", "off").lower().strip()
 
 _PROXY_HOST = os.getenv("AGENTNS_PROXY_HOST", "").strip()
 _PROXY_PORT = os.getenv("AGENTNS_PROXY_PORT", "8400").strip()
-_PROXY_MODE = os.getenv("AGENTNS_PROXY_MODE", "agentgateway").lower().strip()
+# "dans" (default) → /resolve returns this instance's own /proxy/{label} URL,
+#   so every call flows through the built-in firewall. Right choice for self-hosting.
+# "agentgateway"   → /resolve returns /a2a/{namespace}/{label} for an external gateway.
+_PROXY_MODE = os.getenv("AGENTNS_PROXY_MODE", "dans").lower().strip()
 SLIM_ORG    = os.getenv("SLIM_ORG", "")
 
 # Build the proxy endpoints list — Option B (explicit) takes precedence over Option A (derived)
@@ -504,7 +510,7 @@ app = FastAPI(
         "DANS_AUTH=off (default) runs fully open — suitable for internal/sidecar deployments. "
         "For public deployments, set DANS_AUTH=on and use MongoDB (MONGODB_URI)."
     ),
-    version="3.0.0",
+    version=VERSION,
     lifespan=lifespan,
 )
 
@@ -595,7 +601,7 @@ async def landing(request: Request):
     if "text/html" not in request.headers.get("accept", ""):
         return {
             "service": "agentns",
-            "version": "3.1.0",
+            "version": VERSION,
             "docs":    "/docs",
             "health":  "/health",
             "firewall": {
@@ -1453,7 +1459,7 @@ async def health():
         "ok":                      overall == "ok",
         "status":                  overall,
         "service":                 "agentns",
-        "version":                 "3.1.0",
+        "version":                 VERSION,
         "namespace":               DEFAULT_NS,
         "tld":                     DEFAULT_TLD,
         "mongodb_connected":       _mongo_col is not None,
@@ -2091,7 +2097,7 @@ def main() -> None:
     _fed_display   = f"{len(_federation)} registr(ies): {list(_federation)}" if _federation else "disabled"
     print(f"""
 ╔══════════════════════════════════════════════╗
-║          agentns  v3.1.0  starting           ║
+║          agentns  v{VERSION}  starting           ║
 ╚══════════════════════════════════════════════╝
   Port         : {args.port}
   TLD          : {DEFAULT_TLD}

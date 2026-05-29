@@ -32,10 +32,13 @@ jobs:
         run: pytest tests/ -v --tb=short
 
   # ── Build & push ──────────────────────────────────────────────────────────────
+  # Only runs on the canonical repo — forks don't have push access to the GHCR org,
+  # so this job is skipped automatically for them (their PRs still get the test job).
   build-push:
     name: Build & push Docker image
     runs-on: ubuntu-latest
     needs: test
+    if: github.repository == 'DataWorksAI-com/dans'
     permissions:
       contents: read
       packages: write
@@ -64,11 +67,14 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── Deploy ────────────────────────────────────────────────────────────────────
+  # Requires three repo secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY.
+  # Skipped on forks and when DEPLOY_HOST is unset.
   deploy:
-    name: Deploy to 97.107.132.213
+    name: Deploy to production
     needs: build-push
     runs-on: ubuntu-latest
     environment: production
+    if: github.repository == 'DataWorksAI-com/dans'
 
     steps:
       - uses: actions/checkout@v4
@@ -81,14 +87,14 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            cd /opt/agent-registry/src
+            cd ${DEPLOY_DIR:-/opt/dans}
 
             # Pull the newly built image and tag it as the local live image
             docker pull ghcr.io/dataworksai-com/agentns:latest
             docker tag  ghcr.io/dataworksai-com/agentns:latest agentns:live
 
             # Restart the container with the new image
-            docker compose -f docker-compose.atlas.yml up -d --no-deps --force-recreate agentns
+            docker compose -f docker-compose.dans.yml up -d --no-deps --force-recreate agentns
 
             # Health check
             sleep 8

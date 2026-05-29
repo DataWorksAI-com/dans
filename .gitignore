@@ -5,9 +5,25 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Secrets & local config
 .env
 .env.*
 !.env.example
+*.pem
+*-key
+*-key.pub
+id_rsa*
+
+# Generated docs / artifacts
+*.docx
+
+# OS / logs
 *.log
 .DS_Store
 Thumbs.db

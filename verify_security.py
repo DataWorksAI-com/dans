@@ -9,6 +9,10 @@ Runs against any DANS instance. No side effects — all test data is cleaned up.
 """
 import json, sys, urllib.request, urllib.error
 
+# Make box-drawing output safe on Windows consoles (cp1252) and everywhere else.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8200").rstrip("/")
 passed = 0
 failed = 0

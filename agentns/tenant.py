@@ -11,7 +11,7 @@ Key storage: SHA-256 hash in MongoDB tenants collection (never store raw)
 Cache:       5-min TTL on key→tenant lookups to avoid per-request DB hits
 """
 
-import hashlib, os, secrets, time, uuid
+import hashlib, secrets, time, uuid
 from datetime import datetime, timezone
 from typing import Optional, Dict, Tuple
 

@@ -33,17 +33,18 @@ python examples/demo.py
 ```
 
 ```
-[PASS] DANS responding  →  3.1.0
-[PASS] Registered       →  registered
-[PASS] Resolved         →  http://localhost:9001
-[PASS] Protocol negotiated  →  a2a
-[PASS] Direct call works    →  Echo: hello DANS
-[PASS] Proxy call works     →  Echo: hello via proxy
-[PASS] Attack blocked       →  rule:abc123
+[PASS] DANS responding         ->  3.1.0
+[PASS] Registered              ->  registered
+[PASS] Resolved                ->  http://localhost:8200/proxy/echo-agent
+[PASS] Protocol negotiated     ->  a2a
+[PASS] Firewall in path        ->  resolve returned proxy URL — firewall active
+[PASS] Direct call works       ->  Echo: hello DANS
+[PASS] Proxy call works        ->  Echo: hello via proxy
+[PASS] Attack blocked          ->  rule:abc123
 [PASS] Legit query passes
-[PASS] Multi-region metadata inherited
+[PASS] Replica inherited metadata
 ...
-Results: 18/18 passed — ALL GOOD
+Results: 23/23 passed — ALL GOOD
 ```
 
 The echo agent (`examples/echo_agent.py`) is a minimal A2A-compatible HTTP server

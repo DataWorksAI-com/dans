@@ -7,6 +7,10 @@ import sys
 import urllib.request
 import urllib.error
 
+# Make any non-ASCII output safe on Windows consoles (cp1252) and everywhere else.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8200"
 
 def req(method, path, body=None):

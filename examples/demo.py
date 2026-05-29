@@ -20,6 +20,10 @@ Usage:
 
 import json, sys, urllib.request, urllib.error
 
+# Make box-drawing output safe on Windows consoles (cp1252) and everywhere else.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 DANS         = (sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8200").rstrip("/")
 AGENT_URL    = "http://localhost:9001"
 LABEL        = "echo-agent"
@@ -44,9 +48,11 @@ def req(method, path, body=None):
 def check(label, ok, detail=""):
     global passed, failed
     icon = "PASS" if ok else "FAIL"
-    print(f"  [{icon}] {label}" + (f"  →  {detail}" if detail else ""))
-    passed += 1 if ok else None
-    failed += 1 if not ok else None
+    print(f"  [{icon}] {label}" + (f"  ->  {detail}" if detail else ""))
+    if ok:
+        passed += 1
+    else:
+        failed += 1
 
 
 print(f"\n{'='*55}")
@@ -181,11 +187,12 @@ s, d = req("POST", "/register", {
 check("Second endpoint registered",  s == 200, d.get("status"))
 check("Total endpoints",             d.get("total_endpoints", 0) == 2, str(d.get("total_endpoints")))
 
-s, d = req("GET", "/health")
-endpoints = d.get("agents", {}).get(LABEL, [])
+# /agents exposes protocol_metadata per endpoint (/health does not)
+s, d = req("GET", "/agents")
+endpoints = d.get(LABEL, [])
 meta      = [ep.get("protocol_metadata") for ep in endpoints]
-check("Both endpoints show metadata", all(bool(m) for m in meta),
-      f"{len([m for m in meta if m])}/{len(meta)} have metadata")
+check("Replica inherited metadata", len(meta) == 2 and all(bool(m) for m in meta),
+      f"{len([m for m in meta if m])}/{len(meta)} endpoints have metadata")
 print()
 
 # ── 8. Deregister ─────────────────────────────────────────────
