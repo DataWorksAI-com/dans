@@ -1169,16 +1169,20 @@ async def resolve(request: Request, body: dict):
     if "warning" in negotiation:
         result["warning"] = negotiation["warning"]
 
+    # Enrich with proxy URL + slim_identity BEFORE caching, so cache hits and
+    # cache misses return identical results.  If we cached first and proxy-wrapped
+    # after, a cache MISS would return the proxy URL but every cache HIT would
+    # return the raw direct endpoint — making callers intermittently bypass the
+    # proxy/firewall (and, for callers that port-remap direct endpoints, fail).
+    namespace = best_server.get("namespace", DEFAULT_NS)
+    result = _build_proxy_response(result, label, namespace)
+
     # Store with agent_name tag so invalidate() can find it.
     # Use a copy so the pop below doesn't remove the tag from the stored payload.
     result["_cache_key_agent"] = label
     if cache_enabled:
         await _cache.set(cache_key, dict(result), ttl)
     result.pop("_cache_key_agent", None)
-
-    # Enrich with proxy URL + slim_identity when A2A_PROXY_ENDPOINTS is configured
-    namespace = best_server.get("namespace", DEFAULT_NS)
-    result = _build_proxy_response(result, label, namespace)
 
     logger.info(
         f"Resolved '{label}': {result.get('url') or result.get('endpoint')} "
