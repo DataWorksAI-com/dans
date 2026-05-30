@@ -73,9 +73,21 @@ AGENTNS_NAMESPACE=mycompany
 
 ## Python SDK
 
+The SDK is a lightweight client (only `httpx`) — `import agentns` never pulls in the
+server. Use it to register your agent and resolve others.
+
 ```bash
+# Install directly from the repo (works today):
+pip install "git+https://github.com/DataWorksAI-com/dans.git"
+
+# Or, once published to PyPI:
 pip install agentns
 ```
+
+> Running your own DANS **server** needs the extra deps:
+> `pip install "agentns[server]"` (FastAPI, uvicorn, motor, …). The Docker image
+> below already includes these — most people run the server via Docker and only
+> `pip install agentns` for the client SDK in their agent code.
 
 ### Register your agent (at startup)
 

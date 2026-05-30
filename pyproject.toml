@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentns"
+version = "3.1.0"
+description = "DANS — Dynamic Agent Naming Service. DNS for AI agents: register, resolve, firewall, and route between agents."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "DataWorksAI" }]
+keywords = ["agents", "service-discovery", "dns", "a2a", "mcp", "agent-naming", "dans"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core install = the client SDK only (requester_lib + target_lib).
+# These are thin HTTP clients, so the single runtime dependency is httpx.
+# `import agentns` works with just this — it never imports the server.
+dependencies = [
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+# Everything needed to RUN a DANS server: `pip install "agentns[server]"`.
+server = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "slowapi>=0.1.9",
+    "pyyaml>=6.0",
+    "motor>=3.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/DataWorksAI-com/dans"
+Repository = "https://github.com/DataWorksAI-com/dans"
+
+[project.scripts]
+# Available after `pip install "agentns[server]"`.
+agentns-server = "agentns.server:main"
+
+[tool.setuptools]
+packages = ["agentns"]
