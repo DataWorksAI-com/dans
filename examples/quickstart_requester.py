@@ -4,7 +4,7 @@ quickstart_requester.py
 Minimal example: resolve an agent via DANS and call it.
 
 Prerequisites:
-    pip install agentns httpx
+    pip install "git+https://github.com/DataWorksAI-com/dans.git"   # or: pip install agentns (once on PyPI)
 
 Start DANS first:
     docker compose -f docker-compose.dans.yml up -d --build

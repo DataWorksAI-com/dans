@@ -4,7 +4,7 @@ quickstart_target.py
 Minimal example: register your agent with DANS at startup.
 
 Prerequisites:
-    pip install agentns
+    pip install "git+https://github.com/DataWorksAI-com/dans.git"   # or: pip install agentns (once on PyPI)
 
 Start DANS first:
     docker compose -f docker-compose.dans.yml up -d --build
