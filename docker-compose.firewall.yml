@@ -1,0 +1,37 @@
+# docker-compose.firewall.yml — standalone Prompt Firewall (DANS data plane)
+#
+# Runs the firewall as its own service, separate from the DANS naming server.
+# DANS does resolution (control plane); this does the data plane: check the
+# prompt (block / redact / rate-limit), then forward to the agent DANS resolved.
+#
+#   caller --POST /proxy/{label}--> firewall --[resolve via DANS]--> agent
+#
+# Usage:
+#   export DANS_RESOLVE_URL=http://your-dans:8200      # where to resolve
+#   export MONGODB_URI=mongodb+srv://...               # optional (persist rules)
+#   docker compose -f docker-compose.firewall.yml up -d --build
+#
+# Then point DANS at this firewall so /resolve returns firewall proxy URLs:
+#   on the DANS service set  A2A_PROXY_ENDPOINTS=http://<this-firewall-host>:8300
+# (Reuses the same image as the DANS server — just a different entrypoint.)
+
+services:
+  dans-firewall:
+    build:
+      context: .
+      dockerfile: Dockerfile.agentns
+    command: uvicorn agentns.firewall_app:app --host 0.0.0.0 --port 8300
+    ports:
+      - "8300:8300"
+    environment:
+      - FIREWALL_PORT=8300
+      - DANS_RESOLVE_URL=${DANS_RESOLVE_URL:-http://localhost:8200}
+      - MONGODB_URI=${MONGODB_URI:-}
+      - MONGODB_DB=${MONGODB_DB:-agentns}
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8300/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
