@@ -71,7 +71,6 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from .auth             import security_headers_middleware
 from .cache            import ResolutionCache
-from .firewall         import FirewallEngine, FirewallRule, VALID_ACTIONS, _validate_regex
 from .geocoder         import resolve_city, geocode_cache_snapshot
 from .health_checker   import check_agent_health, probe_endpoint
 from .server_selection import rank_servers, select_protocol, negotiate_protocol, calculate_ttl
@@ -179,8 +178,6 @@ _start_time = _time.time()
 # ── Input validation constants ─────────────────────────────────────────────────
 _MAX_LABEL_LEN       = 128
 _MAX_ENDPOINT_LEN    = 512
-_MAX_MATCH_VALUE_LEN = 512   # enforced at the API layer before firewall sees it
-_MAX_PROXY_RESP_SIZE = 10 * 1024 * 1024   # 10 MB — max upstream response buffered in memory
 
 # Semaphore: max concurrent live health checks during a single /resolve call.
 # Without this, an attacker who registers 1000 endpoints can trigger 1000 simultaneous
@@ -314,10 +311,6 @@ _cache = ResolutionCache()
 _mongo_col    = None
 _tenant_col   = None   # tenants collection — None if DANS_AUTH=off or MongoDB unavailable
 _fed_col      = None   # federation collection — persists switchboard registries across restarts
-_firewall_col = None   # firewall rules collection
-
-# Prompt Firewall engine (initialised in lifespan)
-_firewall: FirewallEngine = FirewallEngine()
 
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
@@ -467,18 +460,6 @@ async def lifespan(application: FastAPI):
     await _check_all()          # initial sweep so first /resolve has real data
     task = asyncio.create_task(_health_loop())
 
-    # ── Prompt Firewall ───────────────────────────────────────────────────────
-    global _firewall, _firewall_col
-    _firewall = FirewallEngine()
-    if _mongo_col is not None:
-        try:
-            _firewall_col = _mongo_col.database["firewall"]
-            await _firewall_col.create_index("rule_id", unique=True)
-            await _firewall_col.create_index("label")
-            await _firewall.load_from_mongo(_firewall_col)
-        except Exception as _fw_exc:
-            logger.warning(f"Firewall MongoDB init failed ({_fw_exc}) — rules in-memory only")
-
     total = sum(len(v) for v in _registry.values())
     logger.info(f"DANS auth mode: {DANS_AUTH}")
     logger.info(f"agentns ready — {total} endpoint(s) across {len(_registry)} label(s) | port {PORT}")
@@ -604,12 +585,6 @@ async def landing(request: Request):
             "version": VERSION,
             "docs":    "/docs",
             "health":  "/health",
-            "firewall": {
-                "rules":  "/firewall/rules",
-                "stats":  "/firewall/stats",
-                "test":   "/firewall/test",
-                "proxy":  "/proxy/{label}",
-            },
         }
     tld = DEFAULT_TLD
     # HTML-escape the URL to prevent reflected XSS via crafted request paths
@@ -659,43 +634,8 @@ curl {safe_base_url}/health</pre>
   <div class="card"><h3>&#10084; Health-aware routing</h3>DANS skips unhealthy endpoints automatically and routes to the best available instance.</div>
   <div class="card"><h3>&#127759; Geo-routing</h3>Register multiple instances with locations &mdash; DANS picks the nearest one for each caller.</div>
   <div class="card"><h3>&#128279; Federation</h3>Connect multiple DANS instances together, like DNS zones. Resolve agents across networks.</div>
-  <div class="card"><h3>&#128737; Prompt Firewall</h3>Built-in A2A firewall. Block prompt injection, redact PII from responses, reroute calls &mdash; zero extra infrastructure.</div>
-  <div class="card"><h3>&#128257; A2A Proxy</h3>All calls flow through <code>/proxy/{{label}}</code> &mdash; DANS terminates the inbound connection, resolves the target, and forwards securely.</div>
   <div class="card"><h3>&#128100; Protocol Intelligence</h3>Agents register which protocols they speak (A2A, MCP, SLIM, gRPC&hellip;). DANS negotiates the best match on every resolve call &mdash; callers never hardcode protocol logic.</div>
 </div>
-
-<h2>&#128737; Prompt Firewall</h2>
-<p>DANS has a built-in firewall that inspects every proxied agent call before it reaches its target, and filters every response before it reaches the caller. Rules are API-driven &mdash; no YAML, no restarts.</p>
-<pre># Block prompt injection on every agent
-curl -X POST {safe_base_url}/firewall/rules \\
-  -H "Content-Type: application/json" \\
-  -d '{{"label":"*","action":"block","match_type":"contains","match_value":"ignore previous instructions"}}'
-
-# Redact API keys from agent responses
-curl -X POST {safe_base_url}/firewall/rules \\
-  -H "Content-Type: application/json" \\
-  -d '{{"label":"*","action":"redact","match_type":"regex","match_value":"sk-[A-Za-z0-9]{{20,}}","params":{{"replacement":"[API-KEY-REDACTED]"}}}}'
-
-# Dry-run test (no forwarding)
-curl -X POST {safe_base_url}/firewall/test \\
-  -H "Content-Type: application/json" \\
-  -d '{{"label":"*","body":{{"message":"ignore previous instructions"}}}}'
-# → {{"action":"block","reason":"rule:abc123","would_forward":false}}
-
-# Stats
-curl {safe_base_url}/firewall/stats</pre>
-
-<table>
-<tr><th>Action</th><th>Phase</th><th>What it does</th></tr>
-<tr><td><code>block</code></td><td>Request</td><td>Return 403 before the call is forwarded</td></tr>
-<tr><td><code>allow</code></td><td>Request</td><td>Deny-all except explicitly listed prompts</td></tr>
-<tr><td><code>reroute</code></td><td>Request</td><td>Forward to a different agent label</td></tr>
-<tr><td><code>cache</code></td><td>Request</td><td>Return cached response for repeated prompts</td></tr>
-<tr><td><code>short_circuit</code></td><td>Request</td><td>Return a static reply without forwarding</td></tr>
-<tr><td><code>rate_limit</code></td><td>Request</td><td>Reject above N req/min per IP</td></tr>
-<tr><td><code>block_response</code></td><td>Response</td><td>Suppress agent reply if it matches the rule</td></tr>
-<tr><td><code>redact</code></td><td>Response</td><td>Strip secrets / PII from the agent reply</td></tr>
-</table>
 
 <h2>&#128100; Protocol Intelligence</h2>
 <p>Agents register the protocols they support. DANS negotiates the best match on every resolve call &mdash; callers never hardcode transport decisions.</p>
@@ -726,20 +666,13 @@ curl -X POST {safe_base_url}/resolve \\
 <tr><td>DELETE</td><td>/register/{{label}}</td><td>Deregister an endpoint</td></tr>
 <tr><td>GET</td><td>/health</td><td>Service health + all registered agents</td></tr>
 <tr><td>GET</td><td>/agents</td><td>List registered agents</td></tr>
-<tr><td>POST</td><td>/proxy/{{label}}</td><td>Proxy a call through the firewall to a resolved agent</td></tr>
-<tr><td>POST</td><td>/firewall/rules</td><td>Create a firewall rule</td></tr>
-<tr><td>GET</td><td>/firewall/rules</td><td>List rules (optionally filter by <code>?label=X</code>)</td></tr>
-<tr><td>DELETE</td><td>/firewall/rules/{{rule_id}}</td><td>Delete a firewall rule</td></tr>
-<tr><td>GET</td><td>/firewall/stats</td><td>Hit / block / pass / cache counts per label</td></tr>
-<tr><td>POST</td><td>/firewall/test</td><td>Dry-run: evaluate request + response against rules</td></tr>
 <tr><td>POST</td><td>/switchboard/registries</td><td>Connect a remote registry (federation)</td></tr>
 <tr><td>GET</td><td>/docs</td><td>Interactive API docs (Swagger UI)</td></tr>
 </table>
 
 <p style="margin-top:32px;color:#888;font-size:.85rem">
   Powered by <a href="https://github.com/DataWorksAI-com/dans">DANS — Dynamic Agent Naming Service</a> &nbsp;&middot;&nbsp;
-  <a href="docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="health">Health</a> &nbsp;&middot;&nbsp;
-  <a href="firewall/stats">Firewall Stats</a> &nbsp;&middot;&nbsp; <a href="firewall/rules">Firewall Rules</a>
+  <a href="docs">API Docs</a> &nbsp;&middot;&nbsp; <a href="health">Health</a>
 </p>
 </body></html>"""
     from starlette.responses import HTMLResponse
@@ -1674,411 +1607,7 @@ async def switchboard_deregister(tld: str):
     return {"status": "removed", "tld": tld}
 
 
-# ── proxy helpers ─────────────────────────────────────────────────────────────
-
-# Headers that must not be forwarded (hop-by-hop per RFC 2616 §13.5.1)
-_HOP_BY_HOP = frozenset([
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade",
-    "host", "content-length",
-])
-
-# Headers that a caller could use to override the Host seen by the upstream agent
-# (host header injection / SSRF amplification).  Strip these before forwarding.
-_INJECTED_HOST_HEADERS = frozenset([
-    "x-forwarded-host",
-    "x-original-host",
-    "x-host",
-    "x-real-ip",          # caller-supplied IP that some frameworks trust over socket IP
-    "x-forwarded-server",
-])
-
-
-def _proxy_target(label: str) -> str:
-    """Return the best healthy endpoint URL for *label*, or raise 404/503."""
-    endpoints = _registry.get(label)
-    if not endpoints:
-        raise HTTPException(status_code=404, detail=f"No endpoints registered for label '{label}'")
-
-    servers = [
-        {
-            "server_id":        ep["endpoint"],
-            "endpoint":         ep["endpoint"],
-            "health_check_url": ep.get("health_check_url", ""),
-            "protocols":        ep.get("protocols", []),
-            "region":           ep.get("region", ""),
-            "region_label":     ep.get("region_label", ep.get("region", "")),
-            "location":         ep.get("location", {}),
-        }
-        for ep in endpoints
-    ]
-    health_map = {s["server_id"]: _cached_health(s["server_id"]) for s in servers}
-    ranked     = rank_servers(servers, health_map, {})
-    return ranked[0][0]["endpoint"] if ranked else servers[0]["endpoint"]
-
-
-# ── ANY /proxy/{label}[/{path}] ────────────────────────────────────────────────
-
-@app.api_route(
-    "/proxy/{label}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-)
-@app.api_route(
-    "/proxy/{label}/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-)
-async def proxy_agent(request: Request, label: str, path: str = ""):
-    """
-    Forward a request to the best healthy endpoint registered under *label*.
-
-    URL patterns
-    ------------
-        /proxy/{label}                      → {endpoint}/
-        /proxy/{label}/chat                 → {endpoint}/chat
-        /proxy/{label}/.well-known/agent.json → fetched and A2A url field rewritten
-
-    A2A support
-    -----------
-    - For /.well-known/agent.json the response `url` field is rewritten to
-      point back at this proxy so callers never bypass it on future requests.
-    - The A2A method (message/send, message/stream, etc.) is extracted from
-      the request body and added to structured log lines as a2a=<method>.
-
-    Streaming
-    ---------
-    Server-Sent Events (text/event-stream) are forwarded transparently using
-    StreamingResponse so message/stream works end-to-end.
-    """
-    t0 = _time.monotonic()
-
-    # ── 1. pick best healthy endpoint ─────────────────────────────────────────
-    target_ep  = _proxy_target(label)
-    target_url = target_ep.rstrip("/") + ("/" + path if path else "")
-    if request.query_params:
-        target_url += "?" + str(request.query_params)
-
-    # ── 2. A2A agent card — rewrite url to point at this proxy ───────────────
-    if path == ".well-known/agent.json":
-        try:
-            card_resp = await _proxy_client.get(target_url)
-            data = card_resp.json()
-            proxy_root  = str(request.base_url).rstrip("/")
-            data["url"] = f"{proxy_root}/proxy/{label}"
-            logger.info(f"proxy: agent_card label={label!r} url rewritten → {data['url']!r}")
-            return data
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Could not fetch agent card: {exc}")
-
-    # ── 3. read body; extract A2A method for logging ──────────────────────────
-    body       = await request.body()
-    a2a_method = ""
-    if body:
-        try:
-            _raw_method = json.loads(body).get("method", "")
-            # Ensure it's a plain string (guards against JSON injection or type confusion)
-            # and cap length so it can't bloat logs or bypass fixed-width firewall checks.
-            if isinstance(_raw_method, str):
-                a2a_method = _raw_method[:128]
-        except Exception:
-            pass
-
-    # ── 4. Prompt Firewall evaluation ─────────────────────────────────────────
-    _fw_decision = await _firewall.evaluate(label, body, a2a_method, request.client.host or "")
-    if _fw_decision.action == "block":
-        return JSONResponse(
-            {"error": "blocked", "reason": _fw_decision.reason},
-            status_code=403,
-            headers={"X-Firewall": "block"},
-        )
-    if _fw_decision.action == "short_circuit":
-        return JSONResponse(
-            _fw_decision.payload,
-            headers={"X-Firewall": "short-circuit"},
-        )
-    if _fw_decision.action == "cache_hit":
-        return JSONResponse(
-            _fw_decision.payload,
-            headers={"X-Firewall-Cache": "hit"},
-        )
-    if _fw_decision.action == "reroute":
-        label = _fw_decision.payload   # swap label; re-resolve below
-        target_ep  = _proxy_target(label)
-        target_url = target_ep.rstrip("/") + ("/" + path if path else "")
-        if request.query_params:
-            target_url += "?" + str(request.query_params)
-    if _fw_decision.modified_body is not None:
-        body = _fw_decision.modified_body
-
-    # ── 5. strip hop-by-hop and host-injection headers ────────────────────────
-    # _HOP_BY_HOP  — RFC 2616 §13.5.1 connection-management headers
-    # _INJECTED_HOST_HEADERS — caller-supplied Host override headers that upstream
-    #   frameworks may trust; stripping prevents Host header injection / SSRF pivot.
-    _strip = _HOP_BY_HOP | _INJECTED_HOST_HEADERS
-    fwd_headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in _strip
-    }
-
-    # ── 6. forward and stream the response back ────────────────────────────────
-    # Use the shared _proxy_client — no new client per request (connection reuse).
-    try:
-        upstream_req = _proxy_client.build_request(
-            method  = request.method,
-            url     = target_url,
-            headers = fwd_headers,
-            content = body,
-        )
-        upstream = await _proxy_client.send(upstream_req, stream=True)
-
-        status       = upstream.status_code
-        content_type = upstream.headers.get("content-type", "application/octet-stream")
-        resp_headers = {
-            k: v for k, v in upstream.headers.items()
-            if k.lower() not in _HOP_BY_HOP
-        }
-
-        elapsed = round((_time.monotonic() - t0) * 1000, 1)
-        logger.info(
-            f"proxy: {request.method} /proxy/{label}/{path} → {target_ep} "
-            f"[{status}] {elapsed}ms"
-            + (f" a2a={a2a_method!r}" if a2a_method else "")
-        )
-
-        # SSE / chunked — stream bytes directly to caller
-        if "text/event-stream" in content_type:
-            async def _stream_sse():
-                try:
-                    async for chunk in upstream.aiter_bytes():
-                        yield chunk
-                finally:
-                    await upstream.aclose()   # close response only, NOT the shared client
-            return StreamingResponse(
-                _stream_sse(),
-                status_code = status,
-                headers     = resp_headers,
-                media_type  = content_type,
-            )
-
-        # Normal response — buffer then return.
-        # Check Content-Length first to avoid buffering giant responses in memory.
-        _cl = upstream.headers.get("content-length")
-        if _cl and int(_cl) > _MAX_PROXY_RESP_SIZE:
-            await upstream.aclose()
-            return JSONResponse(
-                {"error": "response_too_large",
-                 "message": f"Upstream response exceeds {_MAX_PROXY_RESP_SIZE // (1024*1024)}MB limit"},
-                status_code=502,
-            )
-        try:
-            content = await upstream.aread()
-        finally:
-            await upstream.aclose()   # close response only, NOT the shared client
-        if len(content) > _MAX_PROXY_RESP_SIZE:
-            return JSONResponse(
-                {"error": "response_too_large",
-                 "message": f"Upstream response exceeds {_MAX_PROXY_RESP_SIZE // (1024*1024)}MB limit"},
-                status_code=502,
-            )
-
-        # ── 9. Response Firewall — evaluate agent reply before returning it ───
-        if content:
-            _fw_resp = await _firewall.evaluate_response(label, content, a2a_method)
-            if _fw_resp.action == "response_blocked":
-                return JSONResponse(
-                    {
-                        "error":   "response_filtered",
-                        "reason":  _fw_resp.reason,
-                        "message": "Agent response blocked by security policy.",
-                    },
-                    status_code=200,
-                    headers={"X-Firewall-Response": "blocked"},
-                )
-            if _fw_resp.action == "redacted" and _fw_resp.modified_body is not None:
-                content = _fw_resp.modified_body
-                resp_headers["X-Firewall-Response"] = "redacted"
-
-        # ── cache successful JSON responses if a cache rule applies ───────────
-        if status == 200 and content and "application/json" in content_type:
-            body_str = body.decode("utf-8", errors="replace") if body else ""
-            _cache_ttl = _firewall.get_cache_ttl_for(label, body_str, a2a_method)
-            if _cache_ttl:
-                try:
-                    import json as _json
-                    _firewall.cache_set(label, body, _json.loads(content), _cache_ttl)
-                except Exception:
-                    pass
-
-        return Response(
-            content     = content,
-            status_code = status,
-            headers     = resp_headers,
-            media_type  = content_type,
-        )
-
-    except httpx.ConnectError:
-        raise HTTPException(status_code=502, detail=f"Could not connect to '{label}' at {target_ep}")
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail=f"Agent '{label}' at {target_ep} timed out")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Proxy error: {exc}")
-
-
-# ── Firewall routes ────────────────────────────────────────────────────────────
-
-@app.post("/firewall/rules", status_code=201)
-async def firewall_add_rule(body: dict):
-    """
-    Create a firewall rule.
-
-    Required:
-        label       — agent label to protect, or "*" for all agents
-        action      — "block" | "allow" | "reroute" | "cache" | "rate_limit" | "short_circuit"
-                      "block_response" | "redact"
-        match_type  — "contains" | "regex" | "method" | "always"
-        match_value — string / regex / A2A method name to match
-
-    Optional:
-        params      — action-specific: {"to":"other-label"} | {"ttl":300} | {"response":{...}} | {"max_per_minute":60}
-        priority    — lower = evaluated first (default 100)
-    """
-    label       = (body.get("label") or "").strip()
-    action      = (body.get("action") or "").strip()
-    match_type  = (body.get("match_type") or "").strip()
-    match_value = (body.get("match_value") or "").strip()
-
-    if not label:
-        raise HTTPException(400, "'label' is required (use '*' for all agents)")
-    if action not in VALID_ACTIONS:
-        raise HTTPException(400, f"Invalid action {action!r}. Must be one of: {', '.join(sorted(VALID_ACTIONS))}")
-    if match_type not in {"contains", "regex", "method", "always"}:
-        raise HTTPException(400, f"Invalid match_type {match_type!r}. Must be one of: contains, regex, method, always")
-    if len(match_value) > _MAX_MATCH_VALUE_LEN:
-        raise HTTPException(
-            400,
-            f"'match_value' must be ≤ {_MAX_MATCH_VALUE_LEN} characters "
-            f"(got {len(match_value)})",
-        )
-
-    # Validate regex patterns off the event loop.
-    # _validate_regex() does a blocking thread join (200ms timeout) to detect
-    # catastrophic backtracking (ReDoS).  Running it in an executor thread means
-    # the event loop is not blocked while the test regex executes.
-    if match_type == "regex":
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(None, _validate_regex, match_value)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-
-    rule = FirewallRule(
-        label       = label,
-        action      = action,
-        match_type  = match_type,
-        match_value = match_value,
-        params      = body.get("params") or {},
-        priority    = int(body.get("priority", 100)),
-    )
-    await _firewall.add_rule(rule)
-    return {"status": "created", "rule": rule.to_dict()}
-
-
-@app.get("/firewall/rules")
-async def firewall_list_rules(label: Optional[str] = None):
-    """List all firewall rules, optionally filtered by label."""
-    rules = _firewall.list_rules(label)
-    return {"rules": [r.to_dict() for r in rules], "total": len(rules)}
-
-
-@app.delete("/firewall/rules/{rule_id}")
-async def firewall_remove_rule(rule_id: str):
-    """Remove a firewall rule by rule_id."""
-    removed = await _firewall.remove_rule(rule_id)
-    if not removed:
-        raise HTTPException(404, f"Rule '{rule_id}' not found")
-    return {"status": "removed", "rule_id": rule_id}
-
-
-@app.get("/firewall/stats")
-async def firewall_stats():
-    """Return hit/block/pass/cache counts per agent label."""
-    return {"stats": _firewall.get_stats()}
-
-
-@app.post("/firewall/test")
-async def firewall_test(body: dict):
-    """
-    Dry-run: evaluate request and/or response bodies against firewall rules
-    without any forwarding.
-
-    Fields:
-        label         — agent label to test against (required)
-        body          — request body dict to evaluate against REQUEST rules
-        response_body — response body dict/str to evaluate against RESPONSE rules
-                        (optional; omit to skip response rule testing)
-
-    Returns:
-        request        — decision for the request body (if provided)
-        response       — decision for the response body (if provided)
-        would_forward  — true only when the request decision is "pass"
-    """
-    import json as _json
-
-    label = (body.get("label") or "").strip()
-    if not label:
-        raise HTTPException(400, "'label' is required")
-
-    result: dict = {}
-
-    # ── Request evaluation ────────────────────────────────────────────────
-    test_body  = body.get("body")
-    if test_body is not None:
-        if isinstance(test_body, str):
-            req_bytes = test_body.encode()
-            method    = ""
-        else:
-            req_bytes = _json.dumps(test_body).encode()
-            method    = test_body.get("method", "") if isinstance(test_body, dict) else ""
-        req_decision = await _firewall.evaluate(label, req_bytes, method, "dry-run")
-        result["request"] = {
-            "action":        req_decision.action,
-            "reason":        req_decision.reason,
-            "would_forward": req_decision.action == "pass",
-            "payload":       req_decision.payload,
-        }
-        # Top-level compat shim (old callers that only passed "body")
-        result["action"]        = req_decision.action
-        result["reason"]        = req_decision.reason
-        result["would_forward"] = req_decision.action == "pass"
-        result["payload"]       = req_decision.payload
-
-    # ── Response evaluation ───────────────────────────────────────────────
-    resp_body = body.get("response_body")
-    if resp_body is not None:
-        if isinstance(resp_body, str):
-            resp_bytes = resp_body.encode()
-            resp_method = ""
-        else:
-            resp_bytes  = _json.dumps(resp_body).encode()
-            resp_method = resp_body.get("method", "") if isinstance(resp_body, dict) else ""
-        resp_decision = await _firewall.evaluate_response(label, resp_bytes, resp_method)
-        redacted_text = None
-        if resp_decision.action == "redacted" and resp_decision.modified_body:
-            try:
-                redacted_text = resp_decision.modified_body.decode("utf-8", errors="replace")
-            except Exception:
-                pass
-        result["response"] = {
-            "action":       resp_decision.action,
-            "reason":       resp_decision.reason,
-            "redacted_body": redacted_text,
-        }
-
-    if not result:
-        raise HTTPException(400, "provide at least one of 'body' or 'response_body'")
-
-    return result
+# ── (proxy + firewall moved to the standalone firewall service: agentns.firewall_app)
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
