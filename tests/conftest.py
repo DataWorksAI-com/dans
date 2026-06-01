@@ -1,6 +1,13 @@
 """
 pytest configuration for agentns tests.
 """
+import os
+
+# Disable rate limiting for the test suite *before* importing the server — the
+# tests fire many requests in quick succession, which would otherwise trip
+# slowapi's limiter (429s) whenever slowapi is installed (e.g. in CI).
+os.environ.setdefault("AGENTNS_RATE_LIMIT", "off")
+
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from agentns.server import app, _registry, _health_cache, _cache

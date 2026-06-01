@@ -29,6 +29,7 @@ jobs:
         env:
           AGENTNS_TLD: agentns.local
           DANS_AUTH: "off"
+          AGENTNS_RATE_LIMIT: "off"   # tests fire many requests fast; don't trip slowapi
         run: pytest tests/ -v --tb=short
 
   # ── Build & push ──────────────────────────────────────────────────────────────

@@ -87,11 +87,14 @@ logger = logging.getLogger("agentns")
 
 # ── rate limiting (optional — requires slowapi) ────────────────────────────────
 # Import early so _limit() is available as a decorator on route functions.
+# Set AGENTNS_RATE_LIMIT=off (or false/0) to disable rate limiting even when
+# slowapi is installed — used by the test suite, which fires many requests fast.
+_RATE_LIMIT_ENABLED = os.getenv("AGENTNS_RATE_LIMIT", "on").lower().strip() not in ("off", "false", "0", "no")
 try:
     from slowapi import Limiter, _rate_limit_exceeded_handler
     from slowapi.errors import RateLimitExceeded
     from slowapi.util import get_remote_address
-    _limiter = Limiter(key_func=get_remote_address)
+    _limiter = Limiter(key_func=get_remote_address, enabled=_RATE_LIMIT_ENABLED)
     _RATE_LIMIT_AVAILABLE = True
 except ImportError:
     _limiter = None
