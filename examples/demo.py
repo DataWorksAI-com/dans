@@ -234,7 +234,7 @@ print()
 
 # ── 8. Deregister ─────────────────────────────────────────────
 print("── 8. Clean up ─────────────────────────────────────────")
-s, _ = req("DELETE", f"/register/{LABEL}", {"endpoint": AGENT_URL})
+s, _ = req("DELETE", f"/register/{LABEL}", {"endpoint": AGENT_REGISTER_URL})
 check("First endpoint removed",  s == 200, "")
 s, _ = req("DELETE", f"/register/{LABEL}", {"endpoint": "http://localhost:9002"})
 check("Second endpoint removed", s == 200, "")
