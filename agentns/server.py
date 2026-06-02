@@ -1326,6 +1326,7 @@ async def deregister(
                     result = await _mongo_col.delete_many({"label": label})
                     removed = result.deleted_count
                 if removed:
+                    await _cache.invalidate(label)
                     logger.info(f"deregister (mongo-only): label={label!r} removed={removed}")
                     return {"status": "deregistered", "label": label, "removed": removed}
             except Exception as exc:
@@ -1368,6 +1369,10 @@ async def deregister(
                 await _mongo_col.delete_many({"label": label})
             except Exception as exc:
                 logger.error(f"MongoDB delete_many failed ({label}): {exc}")
+
+    # Invalidate any cached resolutions for this label, or a stale cache hit
+    # would keep resolving a now-deregistered endpoint (200 instead of 404).
+    await _cache.invalidate(label)
 
     return {"status": "deregistered", "label": label, "removed": removed}
 

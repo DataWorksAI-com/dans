@@ -1,11 +1,17 @@
-# docker-compose.yml — Local development alias
+# docker-compose.yml — Local development stack
 #
 # Quick start:
 #   docker compose up -d --build
-#   curl http://localhost:8200/health
+#   python examples/echo_agent.py        # in another terminal (host :9001)
+#   python examples/demo.py
 #
-# Identical to docker-compose.dans.yml with in-memory defaults (no MongoDB).
-# For persistent deployments set MONGODB_URI or use docker-compose.dans.yml directly.
+# Brings up the full two-plane setup:
+#   • agentns        — DANS naming server (control plane)     :8200
+#   • dans-firewall  — Prompt Firewall / proxy (data plane)   :8300
+#
+# DANS resolution returns a firewall proxy URL (A2A_PROXY_ENDPOINTS below), so
+# every resolved call transparently flows through the firewall. In-memory by
+# default (no MongoDB); set MONGODB_URI for persistence.
 
 services:
   agentns:
@@ -22,13 +28,40 @@ services:
       - DANS_AUTH=off
       - MONGODB_URI=${MONGODB_URI:-}
       - MONGODB_DB=${MONGODB_DB:-agentns}
-      # Route all agent calls through the DANS proxy so the firewall is always active.
-      # For local dev this is localhost:8200. For cloud set this to your public URL.
-      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-http://localhost:8200}
+      # /resolve returns this base + /proxy/{label}. Point it at the firewall
+      # service (data plane) so resolved calls flow through the prompt firewall.
+      - A2A_PROXY_ENDPOINTS=${A2A_PROXY_ENDPOINTS:-http://localhost:8300}
       - ANS_FALLBACK_URL=${ANS_FALLBACK_URL:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dans-firewall:
+    build:
+      context: .
+      dockerfile: Dockerfile.agentns
+    command: uvicorn agentns.firewall_app:app --host 0.0.0.0 --port 8300
+    ports:
+      - "8300:8300"
+    environment:
+      - FIREWALL_PORT=8300
+      # Resolve targets via DANS over the compose network.
+      - DANS_RESOLVE_URL=http://agentns:8200
+      - MONGODB_URI=${MONGODB_URI:-}
+      - MONGODB_DB=${MONGODB_DB:-agentns}
+    # Lets the firewall reach an agent you run on the host (e.g. echo_agent.py)
+    # when it is registered as http://host.docker.internal:9001.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - agentns
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8300/health"]
       interval: 30s
       timeout: 5s
       retries: 3
