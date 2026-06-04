@@ -25,6 +25,7 @@ by default (``include_unhealthy=False``).
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -387,4 +388,14 @@ def calculate_ttl(health: Dict) -> int:
     unhealthy→  5s   (emergency; recheck almost immediately)
     """
     ttl_map = {"healthy": 60, "degraded": 15, "unknown": 10, "unhealthy": 5}
-    return ttl_map.get(health.get("status", "unknown"), 10)
+    ttl = ttl_map.get(health.get("status", "unknown"), 10)
+    # Optional cap (testing/demo): AGENTNS_MAX_TTL=10 forces fast re-resolution
+    # so the resolution panel shows a fresh "LIVE" resolve instead of CACHED.
+    # Default unset → normal production behavior.
+    cap = os.getenv("AGENTNS_MAX_TTL")
+    if cap:
+        try:
+            ttl = min(ttl, int(cap))
+        except ValueError:
+            pass
+    return ttl
